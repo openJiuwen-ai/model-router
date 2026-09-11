@@ -182,7 +182,8 @@ sequenceDiagram
 | `Feedback` | Host → Runtime → State | `version`, `event_id?`, `decision_id?`, `key`, `selected_model_id`, `observed_at_ms?`, `call?`, `extensions` | 具体非泛型结构；`Overflow/Unavailable` 可驱动排除 |
 | `CallFeedback` | 内含于 `Feedback.call` | `outcome`, `latency_ms?`, `cache_valid?` | `call = None` 表示延迟 / 未知评价 |
 | `Extension` | 内含于 `Feedback.extensions` | `schema`, `version`, `data` | `schema` / `version` 非空；`data` 为受约束 `Value` |
-| `TrainingBatch` | Runtime → Evolving | `feedbacks` | 由 DataSelector 按 watermark 组装的训练输入 |
+| `TrainingBatch` | Runtime → Evolving | `feedbacks`, `prompts` | 由 DataSelector 组装的训练输入；`prompts` 为富样本通道 |
+| `TrainingPrompt` | Host journal → Runtime → Evolving | `prompt_id?`, `key`, `request?`, `decision?`, `feedback?`, `text?`, `extensions` | 「请求 → 决策 → 反馈」三元组；字段缺失表示未知 |
 | `Artifact` | Evolving → Runtime | `kind`, `payload` | 不可变训练产物，规划通过 CAS 发布到 state |
 
 #### 3.2.1 Feedback 的结构选择：稳定核心 + 版本化扩展
@@ -316,7 +317,7 @@ pub trait StateProvider: Send + Sync {
 
 ### 4.3 Evolving：批次级纯函数
 
-Evolving 回答“给定一批历史反馈，应生成什么新参数”。
+Evolving 回答“给定一批历史样本，应生成什么新参数”。
 
 ```rust
 pub trait EvolvingProvider: Send + Sync {
@@ -326,15 +327,26 @@ pub trait EvolvingProvider: Send + Sync {
 }
 ```
 
+`TrainingBatch` 有两条并行通道：
+
+| 字段 | 内容 | 来源 |
+|---|---|---|
+| `feedbacks` | `Vec<Feedback>`：只有「选了谁、结果如何」 | `StateProvider`（hint 层，不保留原始请求与决策） |
+| `prompts` | `Vec<TrainingPrompt>`：`请求 → 决策 → 反馈` 三元组，可带宿主渲染好的 `text` | 宿主 journal |
+
+`TrainingPrompt` 的三元组字段全部可选，与反馈侧「缺失表示未知」一致；`key` 始终存在，用于把样本归并到同一会话 / agent。需要携带 feedback、decision、request 等信息的算法走 `prompts` 通道；只靠聚合反馈即可建模的算法继续读 `feedbacks`，两条通道可并存。
+
 设计纪律：
 
 - `fit` 是纯计算，不拉数据、不写 state、不管理线程或时钟。
-- Runtime 的 `DataSelector` 负责准备 `TrainingBatch`。
+- Runtime 的 `DataSelector` 负责准备 `TrainingBatch`：`feedbacks` 来自 state，`prompts` 由宿主 journal 经 `DataSelector::with_prompts` 传入（runtime 在 `route` 时不落盘决策与请求，故宿主是唯一能提供原始 prompt 的来源）。
 - Runtime 的 `TriggerRegistry` 决定何时触发。
 - Runtime 的 `TrainingJob` 调用 `fit`，再通过 `StateProvider.publish` 进行 CAS 写回。
 - Evolving 不占用请求路径的 algorithm 单槽；可按多个训练 job 独立存在。
 
-当前实现只完成了 `EvolvingProvider`、`TrainingBatch`、`Artifact` 和训练/触发骨架。`[[evolving]]` TOML 可以解析，但尚未连接到 `Router` 装配、调度和 CAS 发布流程。
+硬上限：样本 ≤ 1024 条、渲染文本 64 KiB、消息 ≤ 256 条、单条消息 64 KiB；`extensions` 与 `Feedback.extensions` 共用同一套 `Value` 预算。
+
+当前实现只完成了 `EvolvingProvider`、`TrainingBatch`、`TrainingPrompt`、`Artifact` 和训练/触发骨架。`[[evolving]]` TOML 可以解析，但尚未连接到 `Router` 装配、调度和 CAS 发布流程。
 
 ### 4.4 三插件如何形成闭环
 
@@ -904,7 +916,13 @@ impl EvolvingProvider for MyTrainer {
     }
 
     fn fit(&self, batch: &TrainingBatch) -> Arc<Artifact> {
-        let payload = format!("samples={}", batch.feedbacks.len()).into_bytes();
+        // 富样本优先；缺失时降级到纯反馈。
+        let samples = if batch.prompts.is_empty() {
+            batch.feedbacks.len()
+        } else {
+            batch.prompts.len()
+        };
+        let payload = format!("samples={samples}").into_bytes();
         Arc::new(Artifact {
             kind: "MyWeights".into(),
             payload,
@@ -913,7 +931,9 @@ impl EvolvingProvider for MyTrainer {
 }
 ```
 
-当前可用的调用方式是由宿主或自建调度器显式选择实现：
+需要原始 prompt 时读 `batch.prompts`：每条 `TrainingPrompt` 携带 `request`（问了什么）、`decision`（为何选它）与 `feedback`（结果如何），宿主也可直接给渲染好的 `text`。
+
+当前可用的调用方式是由宿主或自建调度器显式选择实现，并把 journal 里的样本挂上：
 
 ```rust
 use openjiuwen_runtime::training::{DataSelector, PublishPlan, TrainingJob};
@@ -923,6 +943,7 @@ let job = TrainingJob {
     selector: DataSelector {
         watermark_key: "router-feedback".into(),
         min_samples: 100,
+        prompts: host_journal.drain_training_prompts(), // Vec<TrainingPrompt>
     },
     publish: PublishPlan {
         slot: "state.my_weights".into(),
@@ -933,7 +954,7 @@ let job = TrainingJob {
 let artifact = job.run_once(&MyTrainer);
 ```
 
-当前 `DataSelector::select` 返回空 batch，`TrainingJob::run_once` 只调用 `fit` 并返回 artifact，尚未执行 `StateProvider.publish`。因此替换 Evolving 的实际含义是：在宿主训练调度器中把传给 `run_once` 的实现换成另一个 `EvolvingProvider`。
+当前 `DataSelector::select` 只做透传，`TrainingJob::run_once` 只调用 `fit` 并返回 artifact，尚未执行 `StateProvider.publish`。因此替换 Evolving 的实际含义是：在宿主训练调度器中把传给 `run_once` 的实现换成另一个 `EvolvingProvider`。
 
 蓝图目标是通过 `[[evolving]]`、`TriggerRegistry` 和 `TrainingJob` 完成声明式选择与 CAS 发布。该路径未完成前，不应把修改 `[[evolving]]` 配置描述成已经能够替换运行中的 Evolving。
 

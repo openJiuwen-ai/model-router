@@ -171,6 +171,13 @@ let selection = plugin.route(&req, &RouteHint::default())?;
 
 `Trigger` / `TriggerSpec`、`TrainingJob` / `DataSelector` / `PublishPlan` 类型已在，判定和后台调度还没有接到 `from_profile` 或 `route`。自演进计算在 `openjiuwen-algorithms::EvolvingProvider`，本层只负责何时跑、怎么写回。
 
+`TrainingBatch` 有两条通道，来源不同：
+
+- `feedbacks` 来自 `StateProvider`：state 是 hint 层，**不保留原始请求与决策**，只有聚合反馈。
+- `prompts`（`TrainingPrompt` 三元组：请求 / 决策 / 反馈）来自**宿主 journal**，经 `DataSelector::with_prompts` 传入。runtime 在 `route` 时不落盘决策与请求，因此这是唯一能拿到原始 prompt 文本的通道。
+
+`DataSelector::select` 只做透传与批量校验，不做字段拼装。
+
 ### 与其它 crate 的关系
 
 ```text

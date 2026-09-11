@@ -182,7 +182,8 @@ This sequence contains two closed loops:
 | `Feedback` | Host → Runtime → State | `version`, `event_id?`, `decision_id?`, `key`, `selected_model_id`, `observed_at_ms?`, `call?`, `extensions` | Concrete non-generic struct; `Overflow/Unavailable` can drive exclusion |
 | `CallFeedback` | Nested in `Feedback.call` | `outcome`, `latency_ms?`, `cache_valid?` | `call = None` means delayed / unknown evaluation |
 | `Extension` | Nested in `Feedback.extensions` | `schema`, `version`, `data` | `schema` / `version` non-empty; `data` is a constrained `Value` |
-| `TrainingBatch` | Runtime → Evolving | `feedbacks` | Training input assembled by DataSelector via watermark |
+| `TrainingBatch` | Runtime → Evolving | `feedbacks`, `prompts` | Training input assembled by DataSelector; `prompts` is the rich-sample channel |
+| `TrainingPrompt` | Host journal → Runtime → Evolving | `prompt_id?`, `key`, `request?`, `decision?`, `feedback?`, `text?`, `extensions` | The request → decision → feedback triple; a missing field means unknown |
 | `Artifact` | Evolving → Runtime | `kind`, `payload` | Immutable training artifact; planned to be published to state via CAS |
 
 #### 3.2.1 Why `Feedback` is structured as a stable core plus versioned extensions
@@ -316,7 +317,7 @@ The current Rust trait's `report` is a synchronous function, and `MemoryState` a
 
 ### 4.3 Evolving: Batch-Level Pure Function
 
-Evolving answers "given a batch of historical feedback, what new parameters should be generated".
+Evolving answers "given a batch of historical samples, what new parameters should be generated".
 
 ```rust
 pub trait EvolvingProvider: Send + Sync {
@@ -326,15 +327,26 @@ pub trait EvolvingProvider: Send + Sync {
 }
 ```
 
+`TrainingBatch` has two parallel channels:
+
+| Field | Content | Source |
+|---|---|---|
+| `feedbacks` | `Vec<Feedback>`: only "which model was chosen and how it turned out" | `StateProvider` (a hint layer; it keeps neither the original request nor the decision) |
+| `prompts` | `Vec<TrainingPrompt>`: the request → decision → feedback triple, optionally with a host-rendered `text` | Host journal |
+
+All three triple fields in `TrainingPrompt` are optional, consistent with the feedback side's "missing means unknown" convention; `key` is always present and groups samples into the same session / agent. Algorithms that need feedback, decision, and request information use the `prompts` channel; algorithms that can model from aggregate feedback alone keep reading `feedbacks`. The two channels may coexist.
+
 Design discipline:
 
 - `fit` is pure computation: it does not pull data, write state, or manage threads or clocks.
-- The Runtime's `DataSelector` prepares the `TrainingBatch`.
+- The Runtime's `DataSelector` prepares the `TrainingBatch`: `feedbacks` come from state, while `prompts` are passed in by the host journal via `DataSelector::with_prompts` (runtime does not persist the decision or request during `route`, so the host is the only source of the original prompt).
 - The Runtime's `TriggerRegistry` decides when to trigger.
 - The Runtime's `TrainingJob` calls `fit`, then performs a CAS write-back via `StateProvider.publish`.
 - Evolving does not occupy the request path's single algorithm slot; it can exist independently across multiple training jobs.
 
-The current implementation only completes `EvolvingProvider`, `TrainingBatch`, `Artifact`, and the training/trigger skeleton. `[[evolving]]` TOML can be parsed, but it is not yet connected to `Router` assembly, scheduling, or the CAS publication flow.
+Hard bounds: at most 1024 samples, 64 KiB of rendered text, at most 256 messages, 64 KiB per message; `extensions` share the same `Value` budget as `Feedback.extensions`.
+
+The current implementation only completes `EvolvingProvider`, `TrainingBatch`, `TrainingPrompt`, `Artifact`, and the training/trigger skeleton. `[[evolving]]` TOML can be parsed, but it is not yet connected to `Router` assembly, scheduling, or the CAS publication flow.
 
 ### 4.4 How the Three Plugins Form a Closed Loop
 
@@ -904,7 +916,13 @@ impl EvolvingProvider for MyTrainer {
     }
 
     fn fit(&self, batch: &TrainingBatch) -> Arc<Artifact> {
-        let payload = format!("samples={}", batch.feedbacks.len()).into_bytes();
+        // Prefer rich samples; fall back to plain feedback.
+        let samples = if batch.prompts.is_empty() {
+            batch.feedbacks.len()
+        } else {
+            batch.prompts.len()
+        };
+        let payload = format!("samples={samples}").into_bytes();
         Arc::new(Artifact {
             kind: "MyWeights".into(),
             payload,
@@ -913,7 +931,9 @@ impl EvolvingProvider for MyTrainer {
 }
 ```
 
-The currently usable invocation is for the host or a self-built scheduler to explicitly select an implementation:
+When the original prompt is needed, read `batch.prompts`: each `TrainingPrompt` carries `request` (what was asked), `decision` (why that model was chosen), and `feedback` (how it turned out); the host may also supply a pre-rendered `text`.
+
+The currently usable invocation is for the host or a self-built scheduler to explicitly select an implementation and attach the journal's samples:
 
 ```rust
 use openjiuwen_runtime::training::{DataSelector, PublishPlan, TrainingJob};
@@ -923,6 +943,7 @@ let job = TrainingJob {
     selector: DataSelector {
         watermark_key: "router-feedback".into(),
         min_samples: 100,
+        prompts: host_journal.drain_training_prompts(), // Vec<TrainingPrompt>
     },
     publish: PublishPlan {
         slot: "state.my_weights".into(),
@@ -933,7 +954,7 @@ let job = TrainingJob {
 let artifact = job.run_once(&MyTrainer);
 ```
 
-Currently `DataSelector::select` returns an empty batch, and `TrainingJob::run_once` only calls `fit` and returns the artifact — it does not yet execute `StateProvider.publish`. Therefore, replacing Evolving in practice means: in the host's training scheduler, swap the implementation passed to `run_once` for another `EvolvingProvider`.
+Currently `DataSelector::select` only passes samples through, and `TrainingJob::run_once` only calls `fit` and returns the artifact — it does not yet execute `StateProvider.publish`. Therefore, replacing Evolving in practice means: in the host's training scheduler, swap the implementation passed to `run_once` for another `EvolvingProvider`.
 
 The blueprint goal is declarative selection and CAS publication through `[[evolving]]`, `TriggerRegistry`, and `TrainingJob`. Until that path is complete, modifying `[[evolving]]` configuration must not be described as already being able to replace a running Evolving.
 

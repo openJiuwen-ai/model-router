@@ -28,6 +28,7 @@ crates/protocol/
     ├── selection.rs      # ModelSelection（Decision 的跨边界投影）
     ├── state_view.rs     # StateView / FeedbackStats
     ├── state_query.rs    # StateQuery / RetrievedItem / StateSnapshot（可选检索）
+    ├── training.rs       # TrainingPrompt / TrainingError（训练样本入参）
     ├── feedback.rs       # Feedback / CallFeedback / Extension / Value / Outcome / FeedbackError
     └── error.rs          # RouterError
 ```
@@ -202,7 +203,24 @@ algorithm decide → Decision
 宿主  Feedback{key, selected_model_id, call{outcome, latency_ms}, extensions}
         ↓
 state 写回，下一轮 snapshot 才能看见
+        ↓ 宿主 journal 按样本组装
+TrainingPrompt{key, request?, decision?, feedback?, text?, extensions}
+        ↓
+TrainingBatch → EvolvingProvider::fit → Artifact
 ```
+
+### 训练样本（`training.rs`）
+
+单条 `Feedback` 只说明「选了谁、结果如何」，不含「问了什么」（请求）与「为什么选」（决策）。`TrainingPrompt` 把 `请求 → 决策 → 反馈` 三元组组装成一条训练样本，供 `EvolvingProvider::fit` 消费。
+
+| 类型 | 作用 |
+|------|------|
+| `TrainingPrompt` | 训练样本：`prompt_id?` / `key` / `request?` / `decision?` / `feedback?` / `text?` / `extensions` |
+| `TrainingError` | 校验错误；`Feedback` / `Extension` 变体复用反馈侧同一套错误 |
+
+四元组全部可选，与反馈侧「缺失表示未知」一致（延迟评价、旧数据、未关联都会缺字段）；`key` 始终存在，用于归并到同一会话。`text` 是宿主已渲染好的 prompt，供算法免拼模板；也可只给结构字段由算法自建模板。
+
+硬上限：样本 ≤ 1024 条（`TRAINING_MAX_PROMPTS`）、渲染文本 64 KiB（`TRAINING_MAX_TEXT_BYTES`）、消息 ≤ 256 条（`TRAINING_MAX_MESSAGES`）、单条消息 64 KiB（`TRAINING_MAX_MESSAGE_BYTES`）。`extensions` 与 `Feedback.extensions` 共用同一套 `Value` 预算。
 
 ## 测试与检查
 
