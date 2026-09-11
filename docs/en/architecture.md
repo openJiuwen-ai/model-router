@@ -677,7 +677,15 @@ Built-in Rust algorithms are registered by name in the runtime registry, all gat
 
 Adding a new built-in algorithm requires three coordinated changes: implement it in `crates/algorithms` behind a feature, register the name in `crates/runtime/src/registry.rs`, and declare the feature in both `crates/algorithms/Cargo.toml` and `crates/runtime/Cargo.toml`.
 
-On the Python side there are also two bundled example algorithms, auto-installed by `discover` scanning sibling subpackages on `import openjiuwen`: `python_cost_aware` (`test_algo/cost_aware.py`, picks the lowest-cost target from a class-attribute cost table) and `python_last_available` (`test_algo2/last_available.py`, picks the last target in the filtered catalog). Both can be assembled by name directly and serve as references for writing custom Python algorithms.
+Bundled Python algorithms are auto-installed by `discover` scanning sibling subpackages on `import openjiuwen`, and can be assembled by name directly:
+
+| Name | Location | Description |
+|---|---|---|
+|  `x-router` | `x_router/` | Classifies a request into five complexity tiers with a small model and picks a target per tier; see [`x-router/README.md`](../../python/openjiuwen/x_router/README.md) |
+| `python_cost_aware` | `test_algo/cost_aware.py` | Example: picks the lowest-cost target from a class-attribute cost table |
+| `python_last_available` | `test_algo2/last_available.py` | Example: picks the last target in the filtered catalog |
+
+The latter two are references for writing custom Python algorithms and demonstrate the minimal `AlgorithmProvider` shape.  `x-router` is a full implementation; classifying with a model needs the `openjiuwen[x-router]` extra, and without it x-router falls back to its built-in heuristic classifier.
 
 ### 7.2 Rust Algorithm
 

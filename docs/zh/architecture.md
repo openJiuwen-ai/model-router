@@ -677,7 +677,15 @@ Rust 内置算法在 runtime registry 按名登记，全部由 feature 门控，
 
 新增内置算法需要三处联动：在 `crates/algorithms` 中实现并按 feature 门控，在 `crates/runtime/src/registry.rs` 登记名字，并在 `crates/algorithms/Cargo.toml` 与 `crates/runtime/Cargo.toml` 同步声明 feature。
 
-Python 侧另有两个随包示例算法，`import openjiuwen` 时由 `discover` 扫描并列子包自动安装：`python_cost_aware`（`test_algo/cost_aware.py`，按类属性成本表选最低成本目标）和 `python_last_available`（`test_algo2/last_available.py`，选过滤后目录的末项目标）。两者可直接按名装配，也可作为自定义 Python 算法的写法参考。
+Python 侧的随包算法由 `discover` 在 `import openjiuwen` 时扫描并列子包自动安装，可直接按名装配：
+
+| 名称 | 位置 | 说明 |
+|---|---|---|
+|  `x-router` | `x_router/` | 用小分类器把请求分成五档复杂度，按档位选模型；见 [`x-router/README.md`](../../python/openjiuwen/x_router/README.md) |
+| `python_cost_aware` | `test_algo/cost_aware.py` | 示例：按类属性成本表选最低成本目标 |
+| `python_last_available` | `test_algo2/last_available.py` | 示例：选过滤后目录的末项目标 |
+
+后两个是写法参考，仅用于演示 `AlgorithmProvider` 的最小形态。 `x-router` 是成建制实现，需要 `openjiuwen[x-router]` 这个 extra 才能用模型分类；不装则回落到内置的启发式分类。
 
 ### 7.2 Rust Algorithm
 
