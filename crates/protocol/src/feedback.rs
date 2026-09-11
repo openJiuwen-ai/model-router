@@ -84,7 +84,8 @@ impl Value {
         self.validate_inner(1, &mut count, &mut 0)
     }
 
-    fn validate_inner(
+    /// 按 `(depth, count, bytes)` 累计校验；供反馈与状态检索共用同一套预算。
+    pub fn validate_inner(
         &self,
         depth: usize,
         count: &mut usize,

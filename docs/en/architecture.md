@@ -114,7 +114,7 @@ Solid lines in the diagram represent the current main call chain; dashed lines m
 The Runtime is the sole owner of control flow:
 
 1. Generate a `RoutingKey` from request metadata.
-2. Call `snapshot` on the current state slot.
+2. Read the current state slot: call `snapshot` when `RouteHint.state_query` is empty, otherwise call the optional `query`; fall back to `snapshot` if `query` fails or returns out-of-bounds data.
 3. Merge request exclusions and state exclusions.
 4. Assemble a `RouteContext` scoped to this request only.
 5. Call `decide` on the current algorithm slot.
@@ -139,8 +139,13 @@ sequenceDiagram
 
     H->>R: route(RouteRequest, RouteHint)
     R->>R: RequestMetadata → RoutingKey
-    R->>S: snapshot(RoutingKey)
-    S-->>R: StateView
+    alt hint.state_query is non-empty
+        R->>S: query(RoutingKey, StateQuery)
+        S-->>R: StateSnapshot(view, retrieved)
+    else no retrieval intent, or query failed
+        R->>S: snapshot(RoutingKey)
+        S-->>R: StateView
+    end
     R->>R: merge exclusions, assemble RouteContext
     R->>A: decide(RouteRequest, RouteContext)
     A-->>R: Decision
@@ -149,7 +154,7 @@ sequenceDiagram
     M-->>H: response / error
     H->>R: report(Feedback)
     R->>S: report(Feedback)
-    Note over S,A: No direct call between State and Algorithm; the only coupling data is RouteContext.view
+    Note over S,A: No direct call between State and Algorithm; the only coupling data is RouteContext.view / .retrieved
 ```
 
 This sequence contains two closed loops:
@@ -165,10 +170,13 @@ This sequence contains two closed loops:
 | `RequestMetadata` | Host → Runtime | `session_id?`, `agent_id?` | The two generate the `RoutingKey` |
 | `RoutingKey` | Runtime → State | `session_id`, `agent_id` | `route` and `report` must use the same key |
 | `RouteRequest` | Host → Runtime → Algorithm | `messages`, `metadata`, `exclusions` | `exclusions` is maintained by host retry logic |
-| `RouteHint` | Host → Runtime | `cache_affinity?` | Blueprint uses it for KV cache decisions; current implementation does not consume it yet |
+| `RouteHint` | Host → Runtime | `cache_affinity?`, `state_query?` | Per-request host hints: KV cache affinity and state retrieval intent |
 | `StateView` | State → Runtime → Algorithm | `affinity?`, `exclusions`, `stats` | An empty view is a legal result; algorithms must degrade gracefully |
+| `StateQuery` | Host → Runtime → State | `text?`, `vector?`, `top_k?`, `extensions` | Retrieval input; all fields optional, `None` means that dimension is unconstrained |
+| `RetrievedItem` | State → Runtime → Algorithm | `id`, `score`, `data?` | A single retrieval hit; `score` must be finite |
+| `StateSnapshot` | State → Runtime | `view`, `retrieved` | Return type of `query`; empty `retrieved` is equivalent to the old behavior |
 | `FeedbackStats` | State → Algorithm | `sample_count` | A hint, not a strongly consistent statistic |
-| `RouteContext` | Runtime → Algorithm | `targets`, `view`, `seed` | Assembled by runtime; plugins do not construct state snapshots themselves |
+| `RouteContext` | Runtime → Algorithm | `targets`, `view`, `retrieved`, `seed` | Assembled by runtime; plugins do not construct state snapshots themselves |
 | `Decision` | Algorithm → Runtime | `selected_model_id`, `reasoning`, `is_answer_call` | Rust-internal decision type |
 | `ModelSelection` | Runtime/PyO3 → Host | Same as `Decision` | Cross-boundary projection, consumed by the host or the next-level plugin |
 | `Feedback` | Host → Runtime → State | `version`, `event_id?`, `decision_id?`, `key`, `selected_model_id`, `observed_at_ms?`, `call?`, `extensions` | Concrete non-generic struct; `Overflow/Unavailable` can drive exclusion |
@@ -222,10 +230,12 @@ To return the id on `report`, the host only needs to keep the `ModelSelection` f
 
 ```text
 StateView = snapshot(RoutingKey)
+StateSnapshot = query(RoutingKey, StateQuery)   # optional; defaults to degrading into snapshot
 
 Decision = decide(RouteRequest, RouteContext {
     targets,
     view: StateView,
+    retrieved: [RetrievedItem],
     seed,
 })
 
@@ -268,6 +278,17 @@ State answers "which cross-request hints may this decision reference", and absor
 pub trait StateProvider: Send + Sync {
     fn snapshot(&self, key: &RoutingKey) -> StateView;
 
+    /// Optional extension, a peer of `snapshot`. The default implementation
+    /// degrades into `snapshot`, so existing implementations compile unchanged.
+    fn query(
+        &self,
+        key: &RoutingKey,
+        query: &StateQuery,
+    ) -> Result<StateSnapshot, StateQueryError> {
+        let _ = query;
+        Ok(StateSnapshot::from_view(self.snapshot(key)))
+    }
+
     fn report(&self, feedback: Feedback);
 
     fn publish(
@@ -281,8 +302,11 @@ pub trait StateProvider: Send + Sync {
 
 Design discipline:
 
-- `snapshot` is the only state read before routing.
-- State is a hint: bounded and lossy; remote timeouts should return an empty view instead of blocking the request.
+- `snapshot` and `query` are **peer** read entry points: the `snapshot` signature is unchanged, while `query` is layered on as an optional capability. Implementations that only provide `snapshot` behave exactly as before.
+- `query` is triggered by the host's `RouteHint.state_query`; when no retrieval intent is carried, the runtime goes straight to `snapshot` with no extra cost.
+- `query` returns a `StateSnapshot`: `view` is isomorphic to `snapshot`, and `retrieved` carries retrieval hits such as KNN results.
+- Retrieval inputs have hard limits: 16 KiB of text, 4,096 vector dimensions, `top_k` ≤ 256, and at most 256 hits; over-limit inputs are validated and degraded on the runtime side and never reach state.
+- State is a hint: bounded and lossy; remote timeouts should return an empty view instead of blocking the request. When `query` fails or returns out-of-bounds data, the runtime degrades to `snapshot` and never blocks routing.
 - `report` is a best-effort feedback entry and must not apply write backpressure to `route`.
 - State only receives feedback that **has already passed protocol validation**: validation happens on the runtime side (`Router::try_report` / Python `PyRouter.report`), and state implementations do not re-validate.
 - `publish` serves evolving's versioned artifact publication; the current trait default implementation is a no-op.
@@ -317,10 +341,14 @@ The current implementation only completes `EvolvingProvider`, `TrainingBatch`, `
 ```mermaid
 flowchart LR
     Request[RouteRequest] --> Snapshot[snapshot]
+    Hint[RouteHint.state_query] -.->|optional| Query[query]
     Key[RoutingKey] --> Snapshot
+    Key --> Query
     Snapshot --> View[StateView]
+    Query --> Snap[StateSnapshot]
     Request --> Decide[decide]
     View --> Context[RouteContext]
+    Snap --> Context
     Targets[TargetSet + seed] --> Context
     Context --> Decide
     Decide --> Decision[Decision]
@@ -809,6 +837,39 @@ Injecting an instance directly is recommended — the lifecycle is clearest:
 router = Router.from_config(config, state=ExclusionStore())
 ```
 
+When finer-grained retrieval (for example text or vector KNN) is needed, additionally implement the optional `query`:
+
+```python
+class VectorStore(StateProvider):
+    name = "my_vector_store"
+
+    def snapshot(self, key):
+        return {}  # degradation path when no retrieval intent is carried
+
+    def query(self, key, query):
+        hits = self._index.search(query.vector or self._embed(query.text),
+                                  k=query.top_k or 8)
+        return {
+            "view": {"exclusions": [], "affinity": None},
+            "retrieved": [
+                {"id": hit.id, "score": hit.score, "data": hit.payload}
+                for hit in hits
+            ],
+        }
+```
+
+The host passes retrieval intent through `RouteHint`:
+
+```python
+from openjiuwen import RouteHint, StateQuery
+
+hint = RouteHint(state_query=StateQuery(text="caching strategy", top_k=4))
+# or pass a vector directly: StateQuery(vector=self._embed(text), top_k=4)
+decision = router.route_sync(request, hint)
+```
+
+On the algorithm side, hits are read from `ctx.retrieved` (`id` / `score` / `data`). Legacy plugins that do not implement `query` need no changes at all: the runtime automatically degrades to `snapshot` and `ctx.retrieved` is an empty list; a `query` that raises or returns out-of-bounds data degrades the same way without blocking routing.
+
 It can also be registered as a named backend:
 
 ```python
@@ -908,6 +969,7 @@ This avoids half-updated states when modifying multiple related slots inside one
 | `Feedback.extensions` versioned extension | Structural validation and pass-through implemented | Unknown schemas carry no semantics; no registry |
 | Feedback dedup / exactly-once | Not implemented | `decision_id` is only a correlation handle, not a delivery guarantee |
 | `RouteHint.cache_affinity` | Defined but not consumed | Do not rely on its decision effect for now |
+| `RouteHint.state_query` + `StateProvider::query` | Implemented (full Rust + Python chain) | Falls back to `snapshot` when no retrieval intent is carried; failures degrade automatically and never block routing |
 | KV coordinator callback | Stored only, never triggered | Do not rely on its switching effect for now |
 | Evolving config, trigger, scheduling, CAS publication | Skeleton | Host must schedule it itself; changing TOML alone is not enough |
 | `evolving` config in Python dict | Not connected | Current conversion ignores this field |
@@ -920,6 +982,8 @@ This avoids half-updated states when modifying multiple related slots inside one
 - Use `try_report` (Rust) / `report_sync` (Python, raises) when you need to know why feedback was rejected; otherwise `report` silently drops illegal values.
 - The host is responsible for model calls and failure retries; the Router does not proxy traffic.
 - The Algorithm still works with an empty `StateView`.
+- Implement `StateProvider::query` when finer retrieval is needed, and pass retrieval intent via `RouteHint.state_query`; plugins that only implement `snapshot` need no changes.
+- Retrieval hits returned by `query` are hints: the algorithm must degrade when `retrieved` is empty.
 - Algorithm/Evolving perform no I/O and keep no cross-call mutable state.
 - State's remote failure path returns an empty view; it must not wait indefinitely.
 - Custom plugins use unique, stable `name`s.
@@ -934,6 +998,7 @@ This avoids half-updated states when modifying multiple related slots inside one
 |---|---|
 | Protocol types | `crates/protocol/src/` |
 | Feedback / Extension / Value definition and validation | `crates/protocol/src/feedback.rs` |
+| StateQuery / RetrievedItem / StateSnapshot | `crates/protocol/src/state_query.rs` |
 | Algorithm contract | `crates/algorithms/src/algorithm_provider.rs` |
 | Evolving contract | `crates/algorithms/src/evolving_provider.rs` |
 | State contract | `crates/state/src/state_provider.rs` |

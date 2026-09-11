@@ -246,3 +246,144 @@ def test_custom_state_works_with_python_algorithm():
     assert router.algorithm_name() == CostAwareAlgorithm.name
     decision = router.route_sync({"session_id": "s-mix", "agent_id": "host"})
     assert decision.selected_model_id == "fast-expensive"
+
+
+class RetrievalStore(StateProvider):
+    """实现了可选 `query`，按文本命中固定条目并回传检索结果。"""
+
+    name = "python_retrieval_store"
+
+    def __init__(self):
+        self.calls = []
+
+    def snapshot(self, key):
+        return {"exclusions": [], "affinity": "snapshot-affinity"}
+
+    def report(self, feedback):
+        pass
+
+    def query(self, key, query):
+        self.calls.append((key.session_id, query.text, query.top_k))
+        return {
+            "view": {"affinity": "query-affinity"},
+            "retrieved": [
+                {"id": "doc-1", "score": 0.9, "data": {"model": "strong-cloud"}},
+                {"id": "doc-2", "score": 0.5},
+            ][: query.top_k or 2],
+        }
+
+
+class ExplodingQueryStore(StateProvider):
+    """`query` 抛异常：验证 runtime 降级为 snapshot，不阻断路由。"""
+
+    name = "python_exploding_query"
+
+    def snapshot(self, key):
+        return {"exclusions": [], "affinity": "fallback-affinity"}
+
+    def report(self, feedback):
+        pass
+
+    def query(self, key, query):
+        raise RuntimeError("backend down")
+
+
+def retrieval_router(store):
+    from openjiuwen import Router
+    return Router.from_config(
+        {
+            "algorithm": "python_cost_aware",
+            "state": {"backend": "memory"},
+            "targets": {"models": ["fast-expensive", "slow-cheap"]},
+        },
+        state=store,
+    )
+
+
+def test_legacy_state_without_query_still_degrades():
+    """旧 Python StateProvider 不实现 query：结果只受 exclusions 影响。"""
+    pytest.importorskip("openjiuwen._openjiuwen")
+    from openjiuwen import RouteHint, Router, StateQuery
+
+    store = ExclusionStore()
+    router = Router.from_config(
+        {
+            "algorithm": "passthrough",
+            "state": {"backend": "memory"},
+            "targets": {"models": ["fast-local", "strong-cloud"]},
+        },
+        state=store,
+    )
+    req = {"session_id": "s-legacy-query", "agent_id": "host"}
+    # 即便携带检索入参，未实现 query 的旧插件也必须照常工作。
+    decision = router.route_sync(req, RouteHint(state_query=StateQuery.text_query("hi")))
+    assert decision.selected_model_id == "fast-local"
+    assert router.route_sync(req).selected_model_id == "fast-local"
+
+
+def test_state_query_reaches_python_and_returns_retrieved():
+    pytest.importorskip("openjiuwen._openjiuwen")
+    from openjiuwen import RetrievedItem, RouteHint, Router, StateQuery
+
+    store = RetrievalStore()
+    router = retrieval_router(store)
+    hint = RouteHint(state_query=StateQuery(text="caching strategy", top_k=2))
+    decision = router.route_sync({"session_id": "s-knn", "agent_id": "host"}, hint)
+    assert decision.selected_model_id == "fast-expensive"
+    assert store.calls == [("s-knn", "caching strategy", 2)]
+
+    # dict 形式入参同样被解析。
+    router.route_sync(
+        {"session_id": "s-knn2", "agent_id": "host"},
+        {"state_query": {"text": "vectors", "vector": [0.1, 0.2], "top_k": 1}},
+    )
+    assert store.calls[-1] == ("s-knn2", "vectors", 1)
+
+    item = RetrievedItem("doc-1", 0.9, {"model": "strong-cloud"})
+    assert item.id == "doc-1"
+    assert item.score == pytest.approx(0.9)
+    assert item.data == {"model": "strong-cloud"}
+
+
+def test_query_failure_falls_back_to_snapshot():
+    pytest.importorskip("openjiuwen._openjiuwen")
+    from openjiuwen import RouteHint, Router, StateQuery
+
+    router = retrieval_router(ExplodingQueryStore())
+    decision = router.route_sync(
+        {"session_id": "s-fallback", "agent_id": "host"},
+        RouteHint(state_query=StateQuery.text_query("boom")),
+    )
+    # 降级后仍是正常路由结果，不被后端异常阻断。
+    assert decision.selected_model_id == "fast-expensive"
+
+
+def test_state_query_validation_rejects_out_of_bounds():
+    pytest.importorskip("openjiuwen._openjiuwen")
+    from openjiuwen import StateQuery
+
+    for kwargs in [
+        {"top_k": 0},
+        {"top_k": 257},
+        {"text": "x" * 16385},
+        {"vector": []},
+        {"vector": [float("nan")]},
+        {"vector": [0.0] * 4097},
+    ]:
+        with pytest.raises((ValueError, TypeError, OverflowError)):
+            StateQuery(**kwargs)
+
+
+def test_retrieved_item_validation_rejects_bad_payload():
+    pytest.importorskip("openjiuwen._openjiuwen")
+    from openjiuwen import RetrievedItem
+
+    for args in [
+        ("doc", float("inf"), None),
+        ("doc", float("nan"), None),
+        ("doc", 0.0, {1: "non-string-key"}),
+        ("doc", 0.0, "x" * 65537),
+    ]:
+        with pytest.raises((ValueError, TypeError, OverflowError)):
+            RetrievedItem(*args)
+

@@ -4,8 +4,8 @@ use pyo3::prelude::*;
 use pyo3::types::PyType;
 
 use openjiuwen_protocol::{
-    Decision, Feedback, FeedbackStats, Message, ModelSelection, RequestMetadata, RouteHint,
-    RouteRequest, RoutingKey, StateView,
+    Decision, Feedback, FeedbackStats, Message, ModelSelection, RequestMetadata, RetrievedItem,
+    RouteHint, RouteRequest, RoutingKey, StateQuery, StateView,
 };
 
 use crate::convert;
@@ -126,14 +126,18 @@ impl From<&RoutingKey> for PyRoutingKey {
 #[derive(Clone, Debug, Default)]
 pub struct PyRouteHint {
     pub cache_affinity: Option<String>,
+    pub state_query: Option<PyStateQuery>,
 }
 
 #[pymethods]
 impl PyRouteHint {
     #[new]
-    #[pyo3(signature = (cache_affinity=None))]
-    fn new(cache_affinity: Option<String>) -> Self {
-        Self { cache_affinity }
+    #[pyo3(signature = (cache_affinity=None, state_query=None))]
+    fn new(cache_affinity: Option<String>, state_query: Option<PyStateQuery>) -> Self {
+        Self {
+            cache_affinity,
+            state_query,
+        }
     }
 }
 
@@ -141,6 +145,144 @@ impl PyRouteHint {
     pub fn native(&self) -> RouteHint {
         RouteHint {
             cache_affinity: self.cache_affinity.clone(),
+            state_query: self.state_query.as_ref().map(PyStateQuery::native),
+        }
+    }
+}
+
+/// 状态检索入参。`snapshot` 的平级可选扩展。
+#[pyclass(name = "StateQuery", get_all, set_all)]
+#[derive(Clone, Debug, Default)]
+pub struct PyStateQuery {
+    pub text: Option<String>,
+    pub vector: Option<Vec<f32>>,
+    pub top_k: Option<u32>,
+    pub extensions: Vec<PyExtension>,
+}
+
+#[pymethods]
+impl PyStateQuery {
+    #[new]
+    #[pyo3(signature = (text=None, vector=None, top_k=None, extensions=None))]
+    fn new(
+        text: Option<String>,
+        vector: Option<Vec<f32>>,
+        top_k: Option<u32>,
+        extensions: Option<Vec<PyExtension>>,
+    ) -> PyResult<Self> {
+        let query = Self {
+            text,
+            vector,
+            top_k,
+            extensions: extensions.unwrap_or_default(),
+        };
+        query
+            .native()
+            .validate()
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+        Ok(query)
+    }
+
+    /// 文本检索便捷构造。
+    #[staticmethod]
+    #[pyo3(signature = (text, top_k=None))]
+    fn text_query(text: String, top_k: Option<u32>) -> Self {
+        Self {
+            text: Some(text),
+            vector: None,
+            top_k,
+            extensions: Vec::new(),
+        }
+    }
+}
+
+impl PyStateQuery {
+    pub fn native(&self) -> StateQuery {
+        StateQuery {
+            text: self.text.clone(),
+            vector: self.vector.clone(),
+            top_k: self.top_k,
+            extensions: self.extensions.iter().map(|e| e.inner.clone()).collect(),
+        }
+    }
+
+    pub fn from_native(query: &StateQuery) -> Self {
+        Self {
+            text: query.text.clone(),
+            vector: query.vector.clone(),
+            top_k: query.top_k,
+            extensions: query
+                .extensions
+                .iter()
+                .map(|inner| PyExtension {
+                    inner: inner.clone(),
+                })
+                .collect(),
+        }
+    }
+}
+
+/// 单条检索结果。
+#[pyclass(name = "RetrievedItem")]
+#[derive(Clone, Debug)]
+pub struct PyRetrievedItem {
+    pub inner: RetrievedItem,
+}
+
+#[pymethods]
+impl PyRetrievedItem {
+    #[new]
+    #[pyo3(signature = (id, score, data=None))]
+    fn new(id: String, score: f64, data: Option<Bound<'_, PyAny>>) -> PyResult<Self> {
+        if !score.is_finite() {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "retrieved item score is not finite",
+            ));
+        }
+        let data = match data {
+            Some(v) if !v.is_none() => {
+                let value = crate::convert::extract_json(&v)?;
+                let mut count = 0;
+                let mut bytes = 0;
+                value
+                    .validate_inner(1, &mut count, &mut bytes)
+                    .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+                Some(value)
+            }
+            _ => None,
+        };
+        Ok(Self {
+            inner: RetrievedItem { id, score, data },
+        })
+    }
+
+    #[getter]
+    fn id(&self) -> &str {
+        &self.inner.id
+    }
+
+    #[getter]
+    fn score(&self) -> f64 {
+        self.inner.score
+    }
+
+    #[getter]
+    fn data<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        match &self.inner.data {
+            Some(value) => convert::json_to_py(py, value),
+            None => Ok(py.None().into_bound(py)),
+        }
+    }
+}
+
+impl PyRetrievedItem {
+    pub fn native(&self) -> RetrievedItem {
+        self.inner.clone()
+    }
+
+    pub fn from_native(item: &RetrievedItem) -> Self {
+        Self {
+            inner: item.clone(),
         }
     }
 }
@@ -271,6 +413,8 @@ pub struct PyRouteContext {
     /// 与 Python 内置算法兼容：直接是模型名列表，不是 TargetSet 包装。
     pub targets: Vec<String>,
     pub view: PyStateView,
+    /// 状态检索命中，按 score 降序；未发起检索时为空。
+    pub retrieved: Vec<PyRetrievedItem>,
     pub seed: u64,
 }
 

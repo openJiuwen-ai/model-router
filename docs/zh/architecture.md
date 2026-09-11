@@ -114,7 +114,7 @@ flowchart TB
 Runtime 是唯一的控制流拥有者：
 
 1. 从请求元数据生成 `RoutingKey`。
-2. 调用当前 state 槽的 `snapshot`。
+2. 读取当前 state 槽：`RouteHint.state_query` 为空时调用 `snapshot`，否则调用可选的 `query`；`query` 失败或返回越界时降级为 `snapshot`。
 3. 合并请求排除项和状态排除项。
 4. 组装只针对本次请求的 `RouteContext`。
 5. 调用当前 algorithm 槽的 `decide`。
@@ -139,8 +139,13 @@ sequenceDiagram
 
     H->>R: route(RouteRequest, RouteHint)
     R->>R: RequestMetadata → RoutingKey
-    R->>S: snapshot(RoutingKey)
-    S-->>R: StateView
+    alt hint.state_query 非空
+        R->>S: query(RoutingKey, StateQuery)
+        S-->>R: StateSnapshot(view, retrieved)
+    else 无检索意图或 query 失败
+        R->>S: snapshot(RoutingKey)
+        S-->>R: StateView
+    end
     R->>R: 合并 exclusions，组装 RouteContext
     R->>A: decide(RouteRequest, RouteContext)
     A-->>R: Decision
@@ -149,7 +154,7 @@ sequenceDiagram
     M-->>H: response / error
     H->>R: report(Feedback)
     R->>S: report(Feedback)
-    Note over S,A: State 与 Algorithm 无直接调用；唯一耦合数据是 RouteContext.view
+    Note over S,A: State 与 Algorithm 无直接调用；唯一耦合数据是 RouteContext.view / .retrieved
 ```
 
 该时序包含两个闭环：
@@ -165,10 +170,13 @@ sequenceDiagram
 | `RequestMetadata` | Host → Runtime | `session_id?`, `agent_id?` | 两者生成 `RoutingKey` |
 | `RoutingKey` | Runtime → State | `session_id`, `agent_id` | `route` 与 `report` 必须使用同一键 |
 | `RouteRequest` | Host → Runtime → Algorithm | `messages`, `metadata`, `exclusions` | `exclusions` 由宿主重试逻辑维护 |
-| `RouteHint` | Host → Runtime | `cache_affinity?` | 蓝图用于 KV cache 决策；当前实现尚未消费 |
+| `RouteHint` | Host → Runtime | `cache_affinity?`, `state_query?` | 宿主的每请求提示：KV cache 亲和与状态检索意图 |
 | `StateView` | State → Runtime → Algorithm | `affinity?`, `exclusions`, `stats` | 空视图是合法结果，算法必须可降级 |
+| `StateQuery` | Host → Runtime → State | `text?`, `vector?`, `top_k?`, `extensions` | 检索入参；全部可选，`None` 表示不约束该维度 |
+| `RetrievedItem` | State → Runtime → Algorithm | `id`, `score`, `data?` | 单条检索命中；`score` 必须有限 |
+| `StateSnapshot` | State → Runtime | `view`, `retrieved` | `query` 的返回；`retrieved` 为空即等价旧行为 |
 | `FeedbackStats` | State → Algorithm | `sample_count` | 是 hint，不是强一致统计 |
-| `RouteContext` | Runtime → Algorithm | `targets`, `view`, `seed` | runtime 组装；插件不自行构造状态快照 |
+| `RouteContext` | Runtime → Algorithm | `targets`, `view`, `retrieved`, `seed` | runtime 组装；插件不自行构造状态快照 |
 | `Decision` | Algorithm → Runtime | `selected_model_id`, `reasoning`, `is_answer_call` | Rust 内部决策类型 |
 | `ModelSelection` | Runtime/PyO3 → Host | 与 `Decision` 相同 | 跨边界投影，供宿主或下一级插件消费 |
 | `Feedback` | Host → Runtime → State | `version`, `event_id?`, `decision_id?`, `key`, `selected_model_id`, `observed_at_ms?`, `call?`, `extensions` | 具体非泛型结构；`Overflow/Unavailable` 可驱动排除 |
@@ -222,10 +230,12 @@ sequenceDiagram
 
 ```text
 StateView = snapshot(RoutingKey)
+StateSnapshot = query(RoutingKey, StateQuery)   # 可选，默认降级为 snapshot
 
 Decision = decide(RouteRequest, RouteContext {
     targets,
     view: StateView,
+    retrieved: [RetrievedItem],
     seed,
 })
 
@@ -268,6 +278,17 @@ State 回答“本次决策可以参考哪些跨请求 hint”，并吸收模型
 pub trait StateProvider: Send + Sync {
     fn snapshot(&self, key: &RoutingKey) -> StateView;
 
+    /// 可选扩展：与 `snapshot` 平级。默认实现降级为 `snapshot`，
+    /// 因此旧实现无需改动即可继续工作。
+    fn query(
+        &self,
+        key: &RoutingKey,
+        query: &StateQuery,
+    ) -> Result<StateSnapshot, StateQueryError> {
+        let _ = query;
+        Ok(StateSnapshot::from_view(self.snapshot(key)))
+    }
+
     fn report(&self, feedback: Feedback);
 
     fn publish(
@@ -281,8 +302,11 @@ pub trait StateProvider: Send + Sync {
 
 设计纪律：
 
-- `snapshot` 是路由前唯一一次状态读取。
-- 状态是 hint：有界、可丢失；远程超时应返回空视图而不是阻断请求。
+- `snapshot` 与 `query` 是**平级**的两个读入口：`snapshot` 签名保持不变，`query` 作为可选能力叠加。只实现 `snapshot` 的插件行为与之前完全一致。
+- `query` 由宿主的 `RouteHint.state_query` 触发；未携带检索意图时 runtime 直接走 `snapshot`，不产生额外开销。
+- `query` 返回 `StateSnapshot`：`view` 与 `snapshot` 同构，`retrieved` 承载 KNN 等检索命中。
+- 检索入参有硬上限：文本 16 KiB、向量 4 096 维、`top_k` ≤ 256、命中条数 ≤ 256；超限在 runtime 侧校验并降级，不进入 state。
+- 状态是 hint：有界、可丢失；远程超时应返回空视图而不是阻断请求。`query` 失败或返回越界时 runtime 降级为 `snapshot`，绝不阻断路由。
 - `report` 是尽力而为的反馈入口，不应给 `route` 施加写入回压。
 - state 只接收**已通过协议校验**的反馈：校验在 runtime 侧完成（`Router::try_report` / Python `PyRouter.report`），state 实现不重复校验。
 - `publish` 服务于 evolving 的版本化产物发布；当前 trait 默认实现是 no-op。
@@ -317,10 +341,14 @@ pub trait EvolvingProvider: Send + Sync {
 ```mermaid
 flowchart LR
     Request[RouteRequest] --> Snapshot[snapshot]
+    Hint[RouteHint.state_query] -.->|可选| Query[query]
     Key[RoutingKey] --> Snapshot
+    Key --> Query
     Snapshot --> View[StateView]
+    Query --> Snap[StateSnapshot]
     Request --> Decide[decide]
     View --> Context[RouteContext]
+    Snap --> Context
     Targets[TargetSet + seed] --> Context
     Context --> Decide
     Decide --> Decision[Decision]
@@ -809,6 +837,39 @@ class ExclusionStore(StateProvider):
 router = Router.from_config(config, state=ExclusionStore())
 ```
 
+需要更精细的检索（例如文本 / 向量 KNN）时，额外实现可选的 `query`：
+
+```python
+class VectorStore(StateProvider):
+    name = "my_vector_store"
+
+    def snapshot(self, key):
+        return {}  # 未携带检索意图时的降级路径
+
+    def query(self, key, query):
+        hits = self._index.search(query.vector or self._embed(query.text),
+                                  k=query.top_k or 8)
+        return {
+            "view": {"exclusions": [], "affinity": None},
+            "retrieved": [
+                {"id": hit.id, "score": hit.score, "data": hit.payload}
+                for hit in hits
+            ],
+        }
+```
+
+宿主通过 `RouteHint` 传入检索意图：
+
+```python
+from openjiuwen import RouteHint, StateQuery
+
+hint = RouteHint(state_query=StateQuery(text="缓存策略", top_k=4))
+# 或直接给向量：StateQuery(vector=self._embed(text), top_k=4)
+decision = router.route_sync(request, hint)
+```
+
+算法侧在 `ctx.retrieved` 读取命中（`id` / `score` / `data`）。不实现 `query` 的旧插件无需任何改动：runtime 会自动降级为 `snapshot`，`ctx.retrieved` 为空列表；`query` 抛异常或返回越界时同样降级，不阻断路由。
+
 也可以登记为命名后端：
 
 ```python
@@ -908,6 +969,7 @@ let artifact = job.run_once(&MyTrainer);
 | `Feedback.extensions` 版本化扩展 | 已实现结构校验与透传 | 未知 schema 不承诺语义，无注册表 |
 | feedback 去重 / exactly-once | 未实现 | `decision_id` 仅作关联线索，不保证唯一投递 |
 | `RouteHint.cache_affinity` | 已定义但未消费 | 暂不能依赖其决策效果 |
+| `RouteHint.state_query` + `StateProvider::query` | 已实现（Rust + Python 全链路） | 未携带检索意图时走 `snapshot`；失败自动降级，不阻断路由 |
 | KV coordinator 回调 | 只保存、不触发 | 暂不能依赖其切换效果 |
 | Evolving 配置、触发、调度、CAS 发布 | 骨架 | 需宿主自行调度，不能只改 TOML |
 | Python dict 中的 `evolving` 配置 | 未接入 | 当前转换会忽略该字段 |
@@ -920,6 +982,8 @@ let artifact = job.run_once(&MyTrainer);
 - 需要感知反馈被拒绝的原因时用 `try_report`（Rust）/ `report_sync`（Python，异常）；其余场景 `report` 会静默丢弃非法值。
 - 宿主负责模型调用和失败重试，Router 不代理流量。
 - Algorithm 在空 `StateView` 下仍可工作。
+- 需要精细检索时实现 `StateProvider::query`，并通过 `RouteHint.state_query` 传入检索意图；只实现 `snapshot` 的插件无需改动。
+- `query` 返回的检索命中是 hint：算法必须能在 `retrieved` 为空时降级。
 - Algorithm/Evolving 不执行 I/O，也不保存跨调用可变状态。
 - State 的远程故障路径返回空视图，不能无限等待。
 - 自定义插件使用唯一、稳定的 `name`。
@@ -934,6 +998,7 @@ let artifact = job.run_once(&MyTrainer);
 |---|---|
 | 协议类型 | `crates/protocol/src/` |
 | Feedback / Extension / Value 定义与校验 | `crates/protocol/src/feedback.rs` |
+| StateQuery / RetrievedItem / StateSnapshot | `crates/protocol/src/state_query.rs` |
 | Algorithm 契约 | `crates/algorithms/src/algorithm_provider.rs` |
 | Evolving 契约 | `crates/algorithms/src/evolving_provider.rs` |
 | State 契约 | `crates/state/src/state_provider.rs` |

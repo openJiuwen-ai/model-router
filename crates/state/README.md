@@ -2,9 +2,11 @@
 
 ## 简介
 
-`openjiuwen-state` 是 openjiuwen-router 的 **L2 状态层**：跨请求记忆的插件契约与内置实现。runtime 只面向 `StateProvider`（`snapshot` / `report` / `publish`）；算法从不直接访问本 crate。
+`openjiuwen-state` 是 openjiuwen-router 的 **L2 状态层**：跨请求记忆的插件契约与内置实现。runtime 只面向 `StateProvider`（`snapshot` / `query` / `report` / `publish`）；算法从不直接访问本 crate。
 
 状态是 hint：有界、可丢失。丢失只降质为冷路由。远程实现超时必须返回空 `StateView`，而不是让请求失败。
+
+读入口有两个，**平级且互不影响**：`snapshot` 是基础读，`query` 是可选扩展。未覆写 `query` 时由 trait 默认实现降级为 `snapshot`，因此旧实现不改一行代码即可继续工作；需要文本 / 向量 KNN 等精细检索时才覆写 `query`。
 
 本 crate 只依赖 `openjiuwen-protocol`。状态团队的唯一接入点是 `StateProvider` trait，与算法侧 `AlgorithmProvider` 对位：运行期单槽选一。
 
@@ -83,6 +85,49 @@ impl StateProvider for NullState {
 
 `RoutingKey` 是 `{session_id, agent_id}`。`report` 与下一次 `snapshot` 必须用同一把键，排除 / 亲和对得上。
 
+### 可选：覆写 `query` 做精细检索
+
+`snapshot` 只能给固定的视图字段；需要按查询文本 / 向量检索时，覆写 `query`：
+
+```rust
+use openjiuwen_protocol::{
+    Feedback, RetrievedItem, RoutingKey, StateQuery, StateQueryError, StateSnapshot, StateView,
+};
+use openjiuwen_state::{CasConflict, StateProvider};
+
+pub struct KnnState {
+    index: MyVectorIndex,
+}
+
+impl StateProvider for KnnState {
+    fn snapshot(&self, _key: &RoutingKey) -> StateView {
+        StateView::empty()
+    }
+
+    fn query(&self, _key: &RoutingKey, query: &StateQuery) -> Result<StateSnapshot, StateQueryError> {
+        // embedding 属于 state 的 I/O；这里只示意检索结果的形状。
+        let hits = self.index.search(query.text.as_deref(), query.vector.as_deref(), query.top_k);
+        Ok(StateSnapshot {
+            view: StateView::empty(),
+            retrieved: hits
+                .into_iter()
+                .map(|h| RetrievedItem::new(h.id, h.score))
+                .collect(),
+        })
+    }
+
+    fn report(&self, _feedback: Feedback) {}
+
+    fn publish(&self, _slot: &str, _artifact: &[u8], _ver: u64) -> Result<(), CasConflict> {
+        Ok(())
+    }
+}
+```
+
+入参有硬上限，超限在 runtime 侧就被拒并降级：文本 16 KiB、向量 4 096 维、`top_k` ≤ 256、命中条数 ≤ 256。`query` 返回的 `StateSnapshot` 会在交给算法前再做一次校验（条数 / 分数有限 / 载荷预算）；不合规或 `Err` 时 runtime 自动退回 `snapshot`，请求照常完成。
+
+宿主通过 `RouteHint.state_query` 触发检索；未携带检索意图时不会调用 `query`。
+
 ## 样例 2：端侧内存实现
 
 ```rust
@@ -114,8 +159,9 @@ let state = MemoryState::new(Duration::from_secs(300), 1024);
 state **从不调用算法**。链路是：
 
 ```text
-runtime.snapshot(key) → StateView
-        ↓ 塞进 RouteContext.view
+runtime.snapshot(key) → StateView            # 基础路径
+runtime.query(key, StateQuery) → StateSnapshot  # 可选：携带检索意图时
+        ↓ 塞进 RouteContext.view / .retrieved
 algorithm.decide(req, ctx) → Decision
         ↓ 宿主调模型
 runtime.report(feedback) → state 写回（下一轮 snapshot 才能看见）

@@ -29,7 +29,7 @@ maturin develop
 | `router.algorithm_name()` | 当前算法槽稳定名 |
 | `register_state(obj)` | 按 `obj.name` 写入进程内注册表；`state.backend` 命中后优先于 `memory` / `remote` |
 
-`request` 可以是 `RouteRequest` 或 dict（`messages` / `metadata` 或顶层 `session_id`+`agent_id` / `exclusions`）。`hint` 可以是 `RouteHint`、`str`（当作 `cache_affinity`）、dict 或 `None`。
+`request` 可以是 `RouteRequest` 或 dict（`messages` / `metadata` 或顶层 `session_id`+`agent_id` / `exclusions`）。`hint` 可以是 `RouteHint`、`str`（当作 `cache_affinity`）、dict 或 `None`；dict 支持 `state_query` 键，可用 `StateQuery` 实例，也可直接给 `{"text": ..., "vector": [...], "top_k": ...}`。
 
 `route` 返回 **`ModelSelection`**（`Decision` 是同一类型的别名）。字段：`selected_model_id` / `reasoning` / `is_answer_call`；`target` 是 `selected_model_id` 的别名。
 
@@ -45,11 +45,13 @@ maturin develop
 | `Message` | `role` / `content`；本层不解释角色语义 |
 | `RequestMetadata` | `session_id` / `agent_id` → `routing_key()` |
 | `RoutingKey` | 与 `Feedback.key` 必须同一把，排除才对得上 |
-| `RouteHint` | 每请求 hint，目前 `cache_affinity` |
+| `RouteHint` | 每请求 hint：`cache_affinity` + `state_query`（可选检索入参） |
 | `ModelSelection`（`Decision`） | `route` 出参；宿主拿 `selected_model_id` 去调模型，并保留 `decision_id` 以便 `report` 关联 |
 | `Feedback` | 回报：`key` + `selected_model_id` + `call`（`outcome` / `latency_ms?` / `cache_valid?`）+ `extensions` |
 | `CallFeedback` | 单次调用结果；`call=None` 表示延迟反馈，state 不更新 |
 | `Extension` | `schema` / `version` / `data`；宿主私有信号走这里，未知 schema 只做结构校验 |
+| `StateQuery` | 检索入参：`text?` / `vector?` / `top_k?` / `extensions`；`StateQuery.text_query(text, top_k?)` 是文本便捷构造 |
+| `RetrievedItem` | 单条命中：`id` / `score` / `data?`；也可用 dict 传入 |
 | `Outcome` | `OK` / `OVERFLOW` / `UNAVAILABLE` / `REJECTED` |
 
 `Feedback.ok(decision, latency_ms, *, key=..., session_id=..., agent_id=..., outcome=...)` 从决策上取模型名，并自动带上其 `decision_id`。`OVERFLOW` / `UNAVAILABLE` 写入 state 排除表；`REJECTED` 不排除；`OK` 更新亲和。
@@ -75,10 +77,13 @@ maturin develop
 |--------|------|
 | `AlgorithmProvider` | `name` + `decide(request, ctx) -> dict \| ModelSelection`。纯函数：不 I/O、不调模型，随机性只用 `ctx.seed` |
 | `StateProvider` | `name` + `snapshot(key) -> dict \| StateView`、`report(feedback)`。状态是 hint；超时应返回空视图 |
-| `RouteContext` | 传给 `decide`：`targets` / `view` / `seed` |
+| `StateProvider.query(key, query)` | **可选**。实现后可做文本 / 向量 KNN 等精细检索，返回 `dict`（`view` + `retrieved`）或 `StateSnapshot`。未实现时 Router 自动降级为 `snapshot` |
+| `RouteContext` | 传给 `decide`：`targets` / `view` / `retrieved` / `seed` |
 | `StateView` | `affinity` / `exclusions` / `stats`；可为空，算法必须能降级 |
 
 `import openjiuwen` 会扫描并列子包并把随包算法写入槽位。包外只要 `import` 你的 `AlgorithmProvider` 子类就会登记。子类必须带稳定 `name`、实现 `decide`、能无参构造；配置写在类属性上。自定义状态仍走 `state=` / `register_state`。
+
+状态检索是**可选能力**：老插件只写 `snapshot` 就能继续工作；需要精细检索时额外实现 `query`。宿主用 `RouteHint(state_query=StateQuery(...))` 传入检索意图，命中结果由算法从 `ctx.retrieved` 读取。检索失败、返回越界或 `query` 抛异常时，runtime 一律降级为 `snapshot`，`ctx.retrieved` 为空列表，路由不中断。
 
 ### 调用链
 
@@ -88,6 +93,7 @@ Python 宿主
     await router.route(RouteRequest | dict, hint?)
         → _openjiuwen（类型转换）
         → runtime snapshot(RoutingKey) → decide
+            或 query(RoutingKey, StateQuery) → StateSnapshot（携带检索意图时）
         → ModelSelection
     宿主自己调用 selected_model_id
     await router.report(Feedback)
@@ -220,3 +226,46 @@ second = router.route_sync(req)
 ```
 
 随包 demo（`openjiuwen.test_algo`）在 `import openjiuwen` 时已写入槽位，可直接 `algorithm = "python_cost_aware"`。端到端 ReAct 宿主：`python tests/react_agent.py`。
+
+## 样例 4：可选的状态检索
+
+只实现 `snapshot` 的插件不受影响；需要 KNN 时额外加 `query`，宿主通过 `RouteHint.state_query` 传入检索意图。
+
+```python
+from openjiuwen import RouteHint, Router, StateProvider, StateQuery
+
+
+class VectorStore(StateProvider):
+    name = "my_vector_store"
+
+    def snapshot(self, key):
+        return {}  # 无检索意图时的降级路径
+
+    def query(self, key, query):
+        hits = self._index.search(query.vector or self._embed(query.text),
+                                  k=query.top_k or 8)
+        return {
+            "view": {"exclusions": [], "affinity": None},
+            "retrieved": [{"id": h.id, "score": h.score, "data": h.payload} for h in hits],
+        }
+
+    def report(self, feedback):
+        pass
+
+
+router = Router.from_config(
+    {
+        "algorithm": "python_cost_aware",
+        "state": {"backend": "memory"},
+        "targets": {"models": ["fast-expensive", "slow-cheap"]},
+    },
+    state=VectorStore(),
+)
+
+hint = RouteHint(state_query=StateQuery(text="缓存策略", top_k=4))
+# 或 StateQuery(vector=embed(text), top_k=4)，或直接给 dict：
+# hint = {"state_query": {"text": "缓存策略", "top_k": 4}}
+decision = router.route_sync({"session_id": "s1", "agent_id": "host"}, hint)
+```
+
+算法侧从 `ctx.retrieved` 读取命中（每项是 `RetrievedItem`，含 `id` / `score` / `data`）。检索入参有硬上限（文本 16 KiB、向量 4 096 维、`top_k` ≤ 256），超限会在构造 `StateQuery` 时抛 `ValueError`。

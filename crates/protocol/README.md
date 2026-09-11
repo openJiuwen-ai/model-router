@@ -27,6 +27,7 @@ crates/protocol/
     ├── decision.rs       # Decision
     ├── selection.rs      # ModelSelection（Decision 的跨边界投影）
     ├── state_view.rs     # StateView / FeedbackStats
+    ├── state_query.rs    # StateQuery / RetrievedItem / StateSnapshot（可选检索）
     ├── feedback.rs       # Feedback / CallFeedback / Extension / Value / Outcome / FeedbackError
     └── error.rs          # RouterError
 ```
@@ -76,7 +77,7 @@ let req = RouteRequest {
 let key = req.routing_key();
 ```
 
-`RouteHint.cache_affinity` 是每请求的 KV cache 驻留模型 hint，作为 `route` 的第二个入参，不放进 `RouteRequest`。
+`RouteHint.cache_affinity` 是每请求的 KV cache 驻留模型 hint，作为 `route` 的第二个入参，不放进 `RouteRequest`。`RouteHint.state_query` 承载状态检索意图（`StateQuery`），runtime 在 `decide_loop` 里据此决定走 `snapshot` 还是可选的 `query`。
 
 ## 样例 2：决策、投影与反馈
 
@@ -130,7 +131,7 @@ let _ = feedback;
 | `RequestMetadata` | `session_id` / `agent_id` → `RoutingKey` |
 | `RoutingKey` | state 快照的键空间 |
 | `TargetSet` | 可选模型语义名；`without` 按原顺序剔除排除项 |
-| `RouteHint` | 宿主每请求输入，目前含 `cache_affinity` |
+| `RouteHint` | 宿主每请求输入：`cache_affinity` + `state_query` |
 
 ### 决策与投影（`decision.rs` / `selection.rs`）
 
@@ -139,7 +140,7 @@ let _ = feedback;
 | `Decision` | 算法出参；`reasoning` 必填；`Decision::answer` 默认应答调用 |
 | `ModelSelection` | `From<Decision>`，供宿主 / 下一级插件消费 |
 
-### 状态快照（`state_view.rs`）
+### 状态视图（`state_view.rs`）
 
 | 类型 | 作用 |
 |------|------|
@@ -147,6 +148,19 @@ let _ = feedback;
 | `FeedbackStats` | 累计样本数等统计，字段随算法需求扩展 |
 
 算法必须能在 `StateView::empty()` 下降级，不能把空视图当成错误。
+
+### 状态检索（`state_query.rs`）
+
+`snapshot` 的平级可选扩展。宿主通过 `RouteHint.state_query` 给出检索意图，state 实现按需覆写 `StateProvider::query`；未覆写时由 trait 默认实现降级为 `snapshot`。
+
+| 类型 | 作用 |
+|------|------|
+| `StateQuery` | 检索入参：`text?` / `vector?` / `top_k?` / `extensions`；全可选，`None` 表示不约束该维度 |
+| `RetrievedItem` | 单条命中：`id` / `score` / `data?`；`score` 必须有限 |
+| `StateSnapshot` | `query` 返回：`view`（与 `snapshot` 同构）+ `retrieved`；`retrieved` 为空即等价旧行为 |
+| `StateQueryError` | 校验 / 后端错误；`Extension` 变体复用反馈侧的 `FeedbackError` |
+
+硬上限：文本 16 KiB（`QUERY_MAX_TEXT_BYTES`）、向量 4 096 维（`QUERY_MAX_VECTOR_DIMS`）、`top_k` ≤ 256（`QUERY_MAX_TOP_K`）、命中 ≤ 256 条（`QUERY_MAX_RETRIEVED`）。`extensions` 与 `Feedback.extensions` 共用同一套 `Value` 预算。runtime 在调用算法前校验；不合格时降级为 `snapshot`，绝不阻断请求。
 
 ### 反馈（`feedback.rs`）
 
@@ -179,7 +193,7 @@ let _ = feedback;
 ```text
 宿主  RouteRequest + RouteHint
         ↓
-runtime snapshot(RoutingKey) → StateView
+runtime snapshot(RoutingKey) → StateView            # 或 query(...) → StateSnapshot
         ↓
 algorithm decide → Decision
         ↓ 可选投影

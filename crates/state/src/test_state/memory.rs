@@ -38,6 +38,8 @@ impl MemoryState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use openjiuwen_protocol::StateQuery;
+
     #[test]
     fn only_calls_update_state() {
         let state = MemoryState::default();
@@ -60,6 +62,18 @@ mod tests {
         assert_eq!(view.stats.sample_count, 5);
         assert_eq!(view.affinity.as_deref(), Some("first"));
         assert_eq!(view.exclusions, vec!["failed"]);
+    }
+
+    /// 未覆盖 `query` 的实现必须原样降级：视图一致、检索结果为空。
+    #[test]
+    fn default_query_degrades_to_snapshot() {
+        let state = MemoryState::default();
+        let key = RoutingKey::default();
+        state.report(Feedback::ok(key.clone(), "m", 3));
+        let query = StateQuery::text("hello").with_top_k(5);
+        let via_query = state.query(&key, &query).expect("default query must not fail");
+        assert_eq!(via_query.view, state.snapshot(&key));
+        assert!(via_query.retrieved.is_empty());
     }
 }
 

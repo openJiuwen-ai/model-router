@@ -18,9 +18,40 @@ class RoutingKey:
     agent_id: str
     def __init__(self, session_id: Optional[str] = ..., agent_id: Optional[str] = ...) -> None: ...
 
+class StateQuery:
+    """状态检索入参，`snapshot` 的平级可选扩展。"""
+    text: Optional[str]
+    vector: Optional[List[float]]
+    top_k: Optional[int]
+    extensions: List[Extension]
+    def __init__(
+        self,
+        text: Optional[str] = ...,
+        vector: Optional[List[float]] = ...,
+        top_k: Optional[int] = ...,
+        extensions: Optional[List[Union[Extension, dict]]] = ...,
+    ) -> None: ...
+    @staticmethod
+    def text_query(text: str, top_k: Optional[int] = ...) -> StateQuery: ...
+
+class RetrievedItem:
+    """单条状态检索结果。"""
+    @property
+    def id(self) -> str: ...
+    @property
+    def score(self) -> float: ...
+    @property
+    def data(self) -> JSONValue: ...
+    def __init__(self, id: str, score: float, data: JSONValue = ...) -> None: ...
+
 class RouteHint:
     cache_affinity: Optional[str]
-    def __init__(self, cache_affinity: Optional[str] = ...) -> None: ...
+    state_query: Optional[StateQuery]
+    def __init__(
+        self,
+        cache_affinity: Optional[str] = ...,
+        state_query: Optional[StateQuery] = ...,
+    ) -> None: ...
 
 class RouteRequest:
     messages: List[Message]
@@ -52,6 +83,7 @@ class StateView:
 class RouteContext:
     targets: List[str]
     view: StateView
+    retrieved: List[RetrievedItem]
     seed: int
 
 class ModelSelection:

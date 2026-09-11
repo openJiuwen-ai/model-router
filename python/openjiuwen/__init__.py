@@ -31,6 +31,8 @@ __all__ = [
     "CallFeedback",
     "Extension",
     "StateView",
+    "StateQuery",
+    "RetrievedItem",
     "RouteContext",
     "register_state",
     "Outcome",
@@ -58,7 +60,9 @@ if TYPE_CHECKING:
         RouteHint,
         RouteRequest,
         RoutingKey,
+        StateQuery,
         StateView,
+        RetrievedItem,
         register_state,
         Router as NativeRouter,
     )
@@ -77,7 +81,9 @@ else:
             RouteHint,
             RouteRequest,
             RoutingKey,
+            StateQuery,
             StateView,
+            RetrievedItem,
             _register_algorithm,
             register_state,
             Router as NativeRouter,
@@ -94,7 +100,9 @@ else:
         RouteHint = None  # type: ignore[misc, assignment]
         RouteRequest = None  # type: ignore[misc, assignment]
         RoutingKey = None  # type: ignore[misc, assignment]
+        StateQuery = None  # type: ignore[misc, assignment]
         StateView = None  # type: ignore[misc, assignment]
+        RetrievedItem = None  # type: ignore[misc, assignment]
         _register_algorithm = None  # type: ignore[misc, assignment]
         register_state = None  # type: ignore[misc, assignment]
 

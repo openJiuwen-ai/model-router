@@ -1,8 +1,29 @@
-//! 决策循环：snapshot → 装配 RouteContext → decide → Decision。
+//! 决策循环：snapshot/query → 装配 RouteContext → decide → Decision。
 
 use openjiuwen_algorithms::{AlgorithmProvider, RouteContext};
-use openjiuwen_protocol::{Decision, RouteHint, RouteRequest, RouterError, TargetSet};
+use openjiuwen_protocol::{Decision, StateView, RouteHint, RouteRequest, RouterError, TargetSet};
 use openjiuwen_state::StateProvider;
+
+/// 读取状态：有检索意图走 `query`，否则走基础 `snapshot`。
+///
+/// 检索失败一律降级为普通快照，绝不让检索能力影响路由可用性。
+fn read_state(
+    state: &dyn StateProvider,
+    key: &openjiuwen_protocol::RoutingKey,
+    hint: &RouteHint,
+) -> (StateView, Vec<openjiuwen_protocol::RetrievedItem>) {
+    let Some(query) = hint.state_query.as_ref() else {
+        return (state.snapshot(key), Vec::new());
+    };
+    if query.is_empty() || query.validate().is_err() {
+        return (state.snapshot(key), Vec::new());
+    }
+    match state.query(key, query) {
+        Ok(snapshot) if snapshot.validate().is_ok() => (snapshot.view, snapshot.retrieved),
+        Ok(snapshot) => (snapshot.view, Vec::new()),
+        Err(_) => (state.snapshot(key), Vec::new()),
+    }
+}
 
 /// 驱动一次纯函数决策。重试时由宿主经 `req.exclusions` 排除已败目标。
 pub fn run(
@@ -13,8 +34,7 @@ pub fn run(
     catalog: &TargetSet,    // 目标集合
     seed: u64,    // 随机种子
 ) -> Result<Decision, RouterError> {    // 返回的是 Result<Decision, RouterError> 类型。
-    let _ = hint;
-    let view = state.snapshot(&req.routing_key());
+    let (view, retrieved) = read_state(state, &req.routing_key(), hint);
     let mut exclusions = req.exclusions.clone();
     // 排除列表扩展。
     exclusions.extend(view.exclusions.iter().cloned());
@@ -24,6 +44,7 @@ pub fn run(
     let ctx: RouteContext = RouteContext {
         targets,
         view,
+        retrieved,
         seed,
     };
     algorithm.decide(req, &ctx)

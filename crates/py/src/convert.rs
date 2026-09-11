@@ -6,13 +6,15 @@ use pyo3::types::{PyDict, PyList, PySequence, PyString, PyType};
 
 use openjiuwen_algorithms::RouteContext;
 use openjiuwen_protocol::{
-    Message, Outcome, RequestMetadata, RouteHint, RouteRequest, RouterError, RoutingKey, StateView,
+    Extension, Message, Outcome, RequestMetadata, RetrievedItem, RouteHint, RouteRequest,
+    RouterError, RoutingKey, StateQuery, StateSnapshot, StateView, MAX_EXTENSIONS,
+    QUERY_MAX_RETRIEVED,
 };
 use openjiuwen_runtime::config::{RouterProfile, StateConfig, TargetsConfig};
 
 use crate::types::{
-    PyMessage, PyModelSelection, PyRequestMetadata, PyRouteContext, PyRouteHint, PyRouteRequest,
-    PyRoutingKey, PyStateView,
+    PyExtension, PyMessage, PyModelSelection, PyRequestMetadata, PyRetrievedItem, PyRouteContext,
+    PyRouteHint, PyRouteRequest, PyRoutingKey, PyStateQuery, PyStateView,
 };
 
 pub fn feedback_error(error: openjiuwen_protocol::FeedbackError) -> PyErr {
@@ -158,11 +160,8 @@ fn strict_u64(dict: &Bound<'_, PyDict>, key: &str) -> PyResult<Option<u64>> {
 }
 
 pub fn extract_feedback(obj: &Bound<'_, PyAny>) -> PyResult<openjiuwen_protocol::Feedback> {
-    use crate::types::{PyCallFeedback, PyExtension, PyFeedback};
-    use openjiuwen_protocol::{
-        feedback::{FEEDBACK_VERSION, MAX_EXTENSIONS},
-        CallFeedback, Extension, Feedback,
-    };
+    use crate::types::{PyCallFeedback, PyFeedback};
+    use openjiuwen_protocol::{feedback::FEEDBACK_VERSION, CallFeedback, Feedback};
     if let Ok(fb) = obj.extract::<PyRef<PyFeedback>>() {
         return fb.native();
     }
@@ -259,31 +258,10 @@ pub fn extract_feedback(obj: &Bound<'_, PyAny>) -> PyResult<openjiuwen_protocol:
         }
         None => Some(call_dict(dict, true)?),
     };
-    let mut extensions = Vec::new();
-    if let Some(raw) = dict.get_item("extensions")? {
-        let list = raw.downcast::<PyList>()?;
-        if list.len() > MAX_EXTENSIONS {
-            return Err(PyValueError::new_err("too many extensions"));
-        }
-        for item in list.iter() {
-            let ext = if let Ok(e) = item.extract::<PyRef<PyExtension>>() {
-                e.inner.clone()
-            } else {
-                let e = item.downcast::<PyDict>()?;
-                for (k, _) in e.iter() {
-                    if !["schema", "version", "data"].contains(&k.extract::<String>()?.as_str()) {
-                        return Err(PyValueError::new_err("unknown extension field"));
-                    }
-                }
-                Extension {
-                    schema: required(e, "schema")?.extract()?,
-                    version: required(e, "version")?.extract()?,
-                    data: extract_json(&required(e, "data")?)?,
-                }
-            };
-            extensions.push(ext);
-        }
-    }
+    let extensions = match dict.get_item("extensions")? {
+        Some(raw) if !raw.is_none() => extract_extensions(&raw)?,
+        _ => Vec::new(),
+    };
     let version = strict_u64(dict, "version")?.unwrap_or(FEEDBACK_VERSION.into());
     let fb = Feedback {
         version: u32::try_from(version)
@@ -475,15 +453,93 @@ pub fn extract_hint(obj: Option<&Bound<'_, PyAny>>) -> PyResult<RouteHint> {
     if obj.downcast::<PyString>().is_ok() {
         return Ok(RouteHint {
             cache_affinity: Some(obj.extract()?),
+            state_query: None,
         });
     }
     if let Ok(dict) = obj.downcast::<PyDict>() {
+        let state_query = match dict.get_item("state_query")? {
+            Some(v) if !v.is_none() => Some(extract_state_query(&v)?),
+            _ => None,
+        };
         return Ok(RouteHint {
             cache_affinity: opt_dict_str(dict, "cache_affinity")?,
+            state_query,
         });
     }
     Err(PyValueError::new_err(
         "hint must be RouteHint, str, dict, or None",
+    ))
+}
+
+/// 解析 Python 侧扩展载荷列表：`Extension` 或 dict。
+///
+/// 与反馈侧共用同一套边界：条数上限 + 未知字段拒绝。
+pub fn extract_extensions(raw: &Bound<'_, PyAny>) -> PyResult<Vec<Extension>> {
+    let list = raw.downcast::<PyList>()?;
+    if list.len() > MAX_EXTENSIONS {
+        return Err(PyValueError::new_err("too many extensions"));
+    }
+    let mut extensions = Vec::new();
+    for item in list.iter() {
+        let ext = if let Ok(e) = item.extract::<PyRef<PyExtension>>() {
+            e.inner.clone()
+        } else {
+            let e = item.downcast::<PyDict>()?;
+            for (k, _) in e.iter() {
+                if !["schema", "version", "data"].contains(&k.extract::<String>()?.as_str()) {
+                    return Err(PyValueError::new_err("unknown extension field"));
+                }
+            }
+            Extension {
+                schema: required(e, "schema")?.extract()?,
+                version: required(e, "version")?.extract()?,
+                data: extract_json(&required(e, "data")?)?,
+            }
+        };
+        extensions.push(ext);
+    }
+    Ok(extensions)
+}
+
+/// 解析 Python 侧检索意图：`StateQuery` 或 dict。
+pub fn extract_state_query(obj: &Bound<'_, PyAny>) -> PyResult<StateQuery> {
+    if let Ok(query) = obj.extract::<PyRef<PyStateQuery>>() {
+        let native = query.native();
+        native
+            .validate()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        return Ok(native);
+    }
+    if let Ok(dict) = obj.downcast::<PyDict>() {
+        let text = match dict.get_item("text")? {
+            Some(v) if !v.is_none() => Some(v.extract()?),
+            _ => None,
+        };
+        let vector = match dict.get_item("vector")? {
+            Some(v) if !v.is_none() => Some(v.extract::<Vec<f32>>()?),
+            _ => None,
+        };
+        let top_k = match dict.get_item("top_k")? {
+            Some(v) if !v.is_none() => Some(v.extract::<u32>()?),
+            _ => None,
+        };
+        let extensions = match dict.get_item("extensions")? {
+            Some(v) if !v.is_none() => extract_extensions(&v)?,
+            _ => Vec::new(),
+        };
+        let query = StateQuery {
+            text,
+            vector,
+            top_k,
+            extensions,
+        };
+        query
+            .validate()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        return Ok(query);
+    }
+    Err(PyValueError::new_err(
+        "state_query must be StateQuery or dict{text, vector, top_k, extensions}",
     ))
 }
 
@@ -546,11 +602,17 @@ pub fn extract_decision(obj: &Bound<'_, PyAny>) -> PyResult<openjiuwen_protocol:
 }
 
 pub fn py_route_context(py: Python<'_>, ctx: &RouteContext) -> PyResult<Py<PyRouteContext>> {
+    let retrieved = ctx
+        .retrieved
+        .iter()
+        .map(crate::types::PyRetrievedItem::from_native)
+        .collect();
     Bound::new(
         py,
         PyRouteContext {
             targets: ctx.targets.models.clone(),
             view: crate::types::PyStateView::from(&ctx.view),
+            retrieved,
             seed: ctx.seed,
         },
     )
@@ -559,6 +621,71 @@ pub fn py_route_context(py: Python<'_>, ctx: &RouteContext) -> PyResult<Py<PyRou
 
 pub fn py_route_request(py: Python<'_>, req: &RouteRequest) -> PyResult<Py<PyRouteRequest>> {
     Bound::new(py, PyRouteRequest::from_native(req)).map(|b| b.unbind())
+}
+
+/// 解析 Python `query()` 返回值：`StateSnapshot`、dict{view, retrieved} 或裸视图。
+///
+/// 兼容旧写法：直接返回 `StateView` / dict{affinity, exclusions} 也能识别，
+/// 此时 `retrieved` 视为空。
+pub fn extract_state_snapshot(obj: &Bound<'_, PyAny>) -> PyResult<StateSnapshot> {
+    if let Ok(dict) = obj.downcast::<PyDict>() {
+        let has_retrieved = dict.contains("retrieved")?;
+        let has_view = dict.contains("view")?;
+        if has_retrieved || has_view {
+            let view = match dict.get_item("view")? {
+                Some(v) if !v.is_none() => extract_state_view(&v)?,
+                _ => StateView::empty(),
+            };
+            let retrieved = match dict.get_item("retrieved")? {
+                Some(v) if !v.is_none() => extract_retrieved_items(&v)?,
+                _ => Vec::new(),
+            };
+            let snapshot = StateSnapshot { view, retrieved };
+            snapshot
+                .validate()
+                .map_err(|e| PyValueError::new_err(e.to_string()))?;
+            return Ok(snapshot);
+        }
+    }
+    if obj.hasattr("retrieved")? && obj.hasattr("view")? {
+        let view = extract_state_view(&obj.getattr("view")?)?;
+        let retrieved = extract_retrieved_items(&obj.getattr("retrieved")?)?;
+        let snapshot = StateSnapshot { view, retrieved };
+        snapshot
+            .validate()
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        return Ok(snapshot);
+    }
+    Ok(StateSnapshot::from_view(extract_state_view(obj)?))
+}
+
+/// 解析检索结果列表：`RetrievedItem` 或 dict{id, score, data}。
+pub fn extract_retrieved_items(raw: &Bound<'_, PyAny>) -> PyResult<Vec<RetrievedItem>> {
+    let list = raw.downcast::<PyList>()?;
+    if list.len() > QUERY_MAX_RETRIEVED {
+        return Err(PyValueError::new_err(format!(
+            "retrieved items exceed {QUERY_MAX_RETRIEVED}"
+        )));
+    }
+    let mut items = Vec::with_capacity(list.len());
+    for item in list.iter() {
+        if let Ok(native) = item.extract::<PyRef<PyRetrievedItem>>() {
+            items.push(native.native());
+            continue;
+        }
+        let d = item.downcast::<PyDict>()?;
+        let id: String = required(d, "id")?.extract()?;
+        let score: f64 = required(d, "score")?.extract()?;
+        if !score.is_finite() {
+            return Err(PyValueError::new_err("retrieved item score is not finite"));
+        }
+        let data = match d.get_item("data")? {
+            Some(v) if !v.is_none() => Some(extract_json(&v)?),
+            _ => None,
+        };
+        items.push(RetrievedItem { id, score, data });
+    }
+    Ok(items)
 }
 
 pub fn extract_state_view(obj: &Bound<'_, PyAny>) -> PyResult<StateView> {
