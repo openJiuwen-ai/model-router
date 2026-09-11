@@ -9,6 +9,7 @@ pub mod request;
 pub mod selection;
 pub mod state_query;
 pub mod state_view;
+pub mod training;
 
 pub use decision::Decision;
 pub use error::RouterError;
@@ -23,3 +24,7 @@ pub use state_query::{
     QUERY_MAX_TEXT_BYTES, QUERY_MAX_TOP_K, QUERY_MAX_VECTOR_DIMS,
 };
 pub use state_view::{FeedbackStats, StateView};
+pub use training::{
+    TrainingError, TrainingPrompt, TRAINING_MAX_MESSAGES, TRAINING_MAX_MESSAGE_BYTES,
+    TRAINING_MAX_PROMPTS, TRAINING_MAX_TEXT_BYTES,
+};
