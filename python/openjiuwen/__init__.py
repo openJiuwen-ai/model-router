@@ -28,7 +28,11 @@ __all__ = [
     "RequestMetadata",
     "RoutingKey",
     "Feedback",
+    "CallFeedback",
+    "Extension",
     "StateView",
+    "StateQuery",
+    "RetrievedItem",
     "RouteContext",
     "register_state",
     "Outcome",
@@ -47,6 +51,8 @@ class Outcome:
 if TYPE_CHECKING:
     from ._openjiuwen import (
         Feedback,
+        CallFeedback,
+        Extension,
         Message,
         ModelSelection,
         RequestMetadata,
@@ -54,7 +60,9 @@ if TYPE_CHECKING:
         RouteHint,
         RouteRequest,
         RoutingKey,
+        StateQuery,
         StateView,
+        RetrievedItem,
         register_state,
         Router as NativeRouter,
     )
@@ -64,6 +72,8 @@ else:
     try:
         from ._openjiuwen import (
             Feedback,
+            CallFeedback,
+            Extension,
             Message,
             ModelSelection,
             RequestMetadata,
@@ -71,7 +81,9 @@ else:
             RouteHint,
             RouteRequest,
             RoutingKey,
+            StateQuery,
             StateView,
+            RetrievedItem,
             _register_algorithm,
             register_state,
             Router as NativeRouter,
@@ -79,6 +91,8 @@ else:
     except ImportError:  # pragma: no cover
         NativeRouter = None  # type: ignore[misc, assignment]
         Feedback = None  # type: ignore[misc, assignment]
+        CallFeedback = None  # type: ignore[misc, assignment]
+        Extension = None  # type: ignore[misc, assignment]
         Message = None  # type: ignore[misc, assignment]
         ModelSelection = None  # type: ignore[misc, assignment]
         RequestMetadata = None  # type: ignore[misc, assignment]
@@ -86,7 +100,9 @@ else:
         RouteHint = None  # type: ignore[misc, assignment]
         RouteRequest = None  # type: ignore[misc, assignment]
         RoutingKey = None  # type: ignore[misc, assignment]
+        StateQuery = None  # type: ignore[misc, assignment]
         StateView = None  # type: ignore[misc, assignment]
+        RetrievedItem = None  # type: ignore[misc, assignment]
         _register_algorithm = None  # type: ignore[misc, assignment]
         register_state = None  # type: ignore[misc, assignment]
 

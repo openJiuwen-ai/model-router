@@ -88,19 +88,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ..Default::default()
     };
 
+    // route 返回前会填充 decision_id（runtime 生成，算法不参与）。
     let decision = router.route(&req, &RouteHint::default())?;
     // 宿主自己调用 decision.selected_model_id 对应的模型
 
-    router.report(Feedback {
-        key: req.routing_key(),
-        selected_model_id: decision.selected_model_id.clone(),
-        outcome: Outcome::Ok, // Overflow / Unavailable 写入排除 hint
-        latency_ms: 40,
-        cache_valid: None,
-    });
+    // Feedback::ok 构造成功反馈；随后补齐关联字段。
+    let mut feedback = Feedback::ok(req.routing_key(), &decision.selected_model_id, 40);
+    feedback.decision_id = decision.decision_id.clone();
+    feedback.observed_at_ms = Some(1_700_000_000_000);
+    // Overflow / Unavailable 写入排除 hint；Rejected 不驱动排除。
+    feedback.call.as_mut().unwrap().outcome = Outcome::Ok;
+
+    // try_report 会校验并返回 FeedbackError；report 是静默丢弃非法值的兼容入口。
+    router.try_report(feedback)?;
     Ok(())
 }
 ```
+
+`Feedback::delayed(key, model)` 用于结果未知的场景（`call = None`，state 不做更新）。要挂载应用私有信号，用 `openjiuwen_protocol::{Extension, Value}` 填 `feedback.extensions`；该路径需直接依赖 protocol crate，`openjiuwen_runtime` 只重导出 `Feedback` / `Outcome` 等必需类型。
 
 测试或配置中心下发文本时用 `Router::from_toml`。`Feedback.key` 必须与 `route` 时的 `RoutingKey` 相同，否则排除/亲和对不上。
 
@@ -165,6 +170,13 @@ let selection = plugin.route(&req, &RouteHint::default())?;
 ### 触发与训练（`trigger.rs` / `training.rs`）
 
 `Trigger` / `TriggerSpec`、`TrainingJob` / `DataSelector` / `PublishPlan` 类型已在，判定和后台调度还没有接到 `from_profile` 或 `route`。自演进计算在 `openjiuwen-algorithms::EvolvingProvider`，本层只负责何时跑、怎么写回。
+
+`TrainingBatch` 有两条通道，来源不同：
+
+- `feedbacks` 来自 `StateProvider`：state 是 hint 层，**不保留原始请求与决策**，只有聚合反馈。
+- `prompts`（`TrainingPrompt` 三元组：请求 / 决策 / 反馈）来自**宿主 journal**，经 `DataSelector::with_prompts` 传入。runtime 在 `route` 时不落盘决策与请求，因此这是唯一能拿到原始 prompt 文本的通道。
+
+`DataSelector::select` 只做透传与批量校验，不做字段拼装。
 
 ### 与其它 crate 的关系
 

@@ -6,11 +6,13 @@ use std::sync::{Arc, Mutex, OnceLock};
 use pyo3::prelude::*;
 use pyo3::types::PyAnyMethods;
 
-use openjiuwen_protocol::{Feedback, RoutingKey, StateView};
+use openjiuwen_protocol::{
+    Feedback, RoutingKey, StateQuery, StateQueryError, StateSnapshot, StateView,
+};
 use openjiuwen_state::{CasConflict, StateProvider};
 
 use crate::convert;
-use crate::types::{PyFeedback, PyRoutingKey};
+use crate::types::{PyFeedback, PyRoutingKey, PyStateQuery};
 
 fn py_states() -> &'static Mutex<HashMap<String, Py<PyAny>>> {
     static PY_STATES: OnceLock<Mutex<HashMap<String, Py<PyAny>>>> = OnceLock::new();
@@ -37,6 +39,28 @@ impl StateProvider for PyStateAdapter {
             match self.obj.bind(py).call_method1("snapshot", (py_key,)) {
                 Ok(result) => convert::extract_state_view(&result).unwrap_or_else(|_| StateView::empty()),
                 Err(_) => StateView::empty(),
+            }
+        })
+    }
+
+    /// Python 侧实现了 `query` 就走它，否则回退 `snapshot`。
+    ///
+    /// 旧版 Python StateProvider 无需改动：没有 `query` 属性时行为与之前完全一致。
+    fn query(&self, key: &RoutingKey, query: &StateQuery) -> Result<StateSnapshot, StateQueryError> {
+        Python::with_gil(|py| {
+            let obj = self.obj.bind(py);
+            let has_query = obj.hasattr("query").unwrap_or(false);
+            if !has_query {
+                return Ok(StateSnapshot::from_view(self.snapshot(key)));
+            }
+            let py_key = Bound::new(py, PyRoutingKey::from(key))
+                .map_err(|e| StateQueryError::Backend(e.to_string()))?;
+            let py_query = Bound::new(py, PyStateQuery::from_native(query))
+                .map_err(|e| StateQueryError::Backend(e.to_string()))?;
+            match obj.call_method1("query", (py_key, py_query)) {
+                Ok(result) => Ok(convert::extract_state_snapshot(&result)
+                    .unwrap_or_else(|_| StateSnapshot::from_view(self.snapshot(key)))),
+                Err(e) => Err(StateQueryError::Backend(e.to_string())),
             }
         })
     }

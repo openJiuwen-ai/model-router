@@ -21,8 +21,8 @@ use openjiuwen_state::StateProvider;
 use crate::convert::{extract_hint, extract_request, profile_from_obj};
 use crate::error::to_py;
 use crate::types::{
-    PyFeedback, PyFeedbackStats, PyMessage, PyModelSelection, PyRequestMetadata, PyRouteContext,
-    PyRouteHint, PyRouteRequest, PyRoutingKey, PyStateView,
+    PyFeedback, PyFeedbackStats, PyMessage, PyModelSelection, PyRequestMetadata, PyRetrievedItem,
+    PyRouteContext, PyRouteHint, PyRouteRequest, PyRoutingKey, PyStateQuery, PyStateView,
 };
 
 struct PyKvCoordinator {
@@ -74,13 +74,11 @@ impl PyRouter {
         Ok(PyModelSelection::from_decision(&d))
     }
 
+    /// 上报反馈。走与 Rust 侧 `Router::try_report` 相同的校验入口；
+    /// 非法反馈抛出 `ValueError`，不会写入 state。
     fn report(&self, feedback: Bound<'_, PyAny>) -> PyResult<()> {
-        let fb = if let Ok(typed) = feedback.extract::<PyRef<PyFeedback>>() {
-            typed.native()?
-        } else {
-            extract_feedback_dict(&feedback)?
-        };
-        self.inner.report(fb);
+        let fb = convert::extract_feedback(&feedback)?;
+        self.inner.try_report(fb).map_err(convert::feedback_error)?;
         Ok(())
     }
 
@@ -119,63 +117,20 @@ fn extract_state(obj: &Bound<'_, PyAny>) -> PyResult<Arc<dyn StateProvider>> {
     state_adapter::adapter_from_obj(obj.clone())
 }
 
-fn extract_feedback_dict(obj: &Bound<'_, PyAny>) -> PyResult<openjiuwen_protocol::Feedback> {
-    use pyo3::types::PyDict;
-    let dict = obj
-        .downcast::<PyDict>()
-        .map_err(|_| pyo3::exceptions::PyValueError::new_err("feedback must be Feedback or dict"))?;
-    let key = match dict.get_item("key")? {
-        Some(k) if !k.is_none() => convert::extract_routing_key(&k)?,
-        _ => openjiuwen_protocol::RoutingKey {
-            session_id: dict_str_or_empty(dict, "session_id")?,
-            agent_id: dict_str_or_empty(dict, "agent_id")?,
-        },
-    };
-    let selected = dict
-        .get_item("selected_model_id")?
-        .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("feedback needs selected_model_id"))?
-        .extract()?;
-    let outcome = match dict.get_item("outcome")? {
-        Some(v) if !v.is_none() => {
-            let s: String = v.extract()?;
-            convert::parse_outcome(&s)?
-        }
-        _ => openjiuwen_protocol::Outcome::Ok,
-    };
-    let latency_ms = match dict.get_item("latency_ms")? {
-        Some(v) if !v.is_none() => v.extract()?,
-        _ => 0,
-    };
-    let cache_valid = match dict.get_item("cache_valid")? {
-        Some(v) if !v.is_none() => Some(v.extract()?),
-        _ => None,
-    };
-    Ok(openjiuwen_protocol::Feedback {
-        key,
-        selected_model_id: selected,
-        outcome,
-        latency_ms,
-        cache_valid,
-    })
-}
-
-fn dict_str_or_empty(dict: &Bound<'_, pyo3::types::PyDict>, key: &str) -> PyResult<String> {
-    match dict.get_item(key)? {
-        Some(v) if !v.is_none() => v.extract(),
-        _ => Ok(String::new()),
-    }
-}
-
 #[pymodule]
 fn _openjiuwen(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyRouter>()?;
     m.add_class::<PyModelSelection>()?;
     m.add_class::<PyRouteRequest>()?;
     m.add_class::<PyRouteHint>()?;
+    m.add_class::<PyStateQuery>()?;
+    m.add_class::<PyRetrievedItem>()?;
     m.add_class::<PyMessage>()?;
     m.add_class::<PyRequestMetadata>()?;
     m.add_class::<PyRoutingKey>()?;
     m.add_class::<PyFeedback>()?;
+    m.add_class::<types::PyCallFeedback>()?;
+    m.add_class::<types::PyExtension>()?;
     m.add_class::<PyStateView>()?;
     m.add_class::<PyFeedbackStats>()?;
     m.add_class::<PyRouteContext>()?;

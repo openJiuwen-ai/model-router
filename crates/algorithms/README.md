@@ -104,7 +104,16 @@ impl AlgorithmProvider for FirstAvailable {
 
 ## 样例 2：在线自演进（EvolvingProvider）
 
-`EvolvingProvider::fit` 回答「给我一批历史反馈，重算出一份新参数集」。不允许 I/O。
+`EvolvingProvider::fit` 回答「给我一批历史样本，重算出一份新参数集」。不允许 I/O。
+
+`TrainingBatch` 有两条并行通道，算法按需读取，空批次是合法输入：
+
+| 字段 | 内容 | 来源 |
+|------|------|------|
+| `feedbacks` | `Vec<Feedback>`：只有「选了谁、结果如何」 | `StateProvider`（hint 层，不保留请求与决策） |
+| `prompts` | `Vec<TrainingPrompt>`：`请求 → 决策 → 反馈` 三元组，可带宿主渲染好的 `text` | 宿主 journal（runtime 不落盘决策与请求） |
+
+只靠反馈就能建模的算法继续读 `feedbacks` 即可；需要原始 prompt 做 embedding 或监督信号的读 `prompts`。
 
 ```rust
 use std::sync::Arc;
@@ -117,10 +126,17 @@ impl EvolvingProvider for MfWeights {
         "mf-weights"
     }
 
-    fn fit(&self, _batch: &TrainingBatch) -> Arc<Artifact> {
+    fn fit(&self, batch: &TrainingBatch) -> Arc<Artifact> {
+        // 富样本优先；缺失时降级到纯反馈。
+        let samples = if batch.prompts.is_empty() {
+            batch.feedbacks.len()
+        } else {
+            batch.prompts.len()
+        };
+        let payload = format!("samples={samples}").into_bytes();
         Arc::new(Artifact {
             kind: "MfWeights".into(),
-            payload: Vec::new(),
+            payload,
         })
     }
 }
@@ -145,6 +161,8 @@ impl EvolvingProvider for MfWeights {
 ### `EvolvingProvider`（参数自优化）
 
 与 `AlgorithmProvider` 同为算法团队交付面，但不占路由单槽。由触发机制驱动，可多 job 并存。示意实现在 `test_algo::evolving`：骨架提供 `MfWeights`（`evolving-mf`），`fit` 返回空 `Artifact`。
+
+`TrainingBatch` 的 `prompts` 通道由宿主 journal 提供，不从 state 来——state 只有聚合反馈，runtime 也不落盘请求与决策。算法只消费组装好的批次，不自己拉数。
 
 ### 与 runtime / state 的关系
 

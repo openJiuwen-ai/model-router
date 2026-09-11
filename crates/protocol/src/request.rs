@@ -1,5 +1,7 @@
 //! 路由请求与目标集合。
 
+use crate::state_query::StateQuery;
+
 /// 单条对话消息。协议层只搬运文本，不解释角色语义。
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Message {
@@ -62,9 +64,24 @@ impl TargetSet {
 }
 
 /// 宿主侧每请求输入。`cache_affinity` 是 KV cache 驻留模型 hint。
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+///
+/// `state_query` 为可选的检索意图：`None`（默认）时 runtime 走
+/// `StateProvider::snapshot`，与旧版行为完全一致；`Some` 时改走
+/// `StateProvider::query`。
+///
+/// 注意：因 [`StateQuery`] 携带浮点向量，本结构体只派生 `PartialEq`。
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct RouteHint {
     pub cache_affinity: Option<String>, // 缓存亲和性提示
+    pub state_query: Option<StateQuery>, // 可选的状态检索意图
+}
+
+impl RouteHint {
+    /// 创建带检索意图的 hint。
+    pub fn with_state_query(mut self, query: StateQuery) -> Self {
+        self.state_query = Some(query);
+        self
+    }
 }
 
 /// 路由入参。`exclusions` 由宿主重试逻辑填写。

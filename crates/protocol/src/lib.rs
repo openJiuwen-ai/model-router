@@ -7,11 +7,24 @@ pub mod error;
 pub mod feedback;
 pub mod request;
 pub mod selection;
+pub mod state_query;
 pub mod state_view;
+pub mod training;
 
 pub use decision::Decision;
 pub use error::RouterError;
-pub use feedback::{Feedback, Outcome};
+pub use feedback::{
+    CallFeedback, Extension, Feedback, FeedbackError, Outcome, Value, MAX_EXTENSIONS,
+    VALUE_MAX_BYTES,
+};
 pub use request::{Message, RequestMetadata, RouteHint, RouteRequest, RoutingKey, TargetSet};
 pub use selection::ModelSelection;
+pub use state_query::{
+    RetrievedItem, StateQuery, StateQueryError, StateSnapshot, QUERY_MAX_RETRIEVED,
+    QUERY_MAX_TEXT_BYTES, QUERY_MAX_TOP_K, QUERY_MAX_VECTOR_DIMS,
+};
 pub use state_view::{FeedbackStats, StateView};
+pub use training::{
+    TrainingError, TrainingPrompt, TRAINING_MAX_MESSAGES, TRAINING_MAX_MESSAGE_BYTES,
+    TRAINING_MAX_PROMPTS, TRAINING_MAX_TEXT_BYTES,
+};
