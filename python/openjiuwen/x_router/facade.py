@@ -1,7 +1,13 @@
 """Configuration, assembly, and request shaping.
 
 Two kernel limitations are absorbed here, which is why this module exists at
-all. Both are described in DESIGN.md section 5.
+all. Both are described in DESIGN.md section 5. The bandit adds a third of the
+same kind (G6): a custom state backend receives nothing from ``[state]``, so
+``BanditStore`` is configured from ``[x-router.bandit.store]`` and handed to the
+kernel as an instance.
+
+Everything here runs once, at start-up. The per-request side of the bandit
+loop — the retrieval hint, the scored-outcome report — lives in ``service.py``.
 
 The algorithm slot cannot receive parameters from the profile, so
 :func:`build_router` generates a configured subclass instead of handing
@@ -20,16 +26,23 @@ because x-router reads only text.
 
 from __future__ import annotations
 
+import warnings
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
+from .bandit_store import STORE_BACKEND, BanditStore
 from .classifier import backend_from_config
 from .complexity import content_text
-from .types import ComplexityBackend, ParamsError, XRouterParams
+from .judge import judge_from_config
+from .types import BanditStoreParams, ComplexityBackend, ParamsError, XRouterParams
 
 __all__ = [
     "SECTION",
+    "build_judge",
+    "build_params",
     "build_request",
     "build_router",
+    "build_store",
+    "build_store_params",
     "load_profile",
     "normalize_messages",
 ]
@@ -119,13 +132,73 @@ def build_params(config, backend=None):
     return params
 
 
+def build_store_params(config):
+    # type: (Any) -> Optional[BanditStoreParams]
+    """Parameters from ``[x-router.bandit.store]``, or ``None`` when the table is absent."""
+    profile = load_profile(config)
+    section = profile.get(SECTION) or {}
+    return BanditStoreParams.from_mapping(section.get("bandit"))
+
+
+def build_store(config, retriever=None):
+    # type: (Any, Any) -> BanditStore
+    """Construct the ``BanditStore`` a profile describes.
+
+    Build it yourself when you need the instance — for ``stats``, to advance
+    the policy version with ``publish``, or to keep the memory across Router
+    rebuilds — and pass it to :func:`build_router` as ``state``. Otherwise
+    :func:`build_router` builds one for you.
+    """
+    params = build_store_params(config)
+    if params is None:
+        raise ParamsError("profile has no [{0}.bandit.store] table".format(SECTION))
+    return BanditStore(params, retriever=retriever)
+
+
+def _resolve_state(profile, params, state):
+    # type: (Mapping[str, Any], XRouterParams, Any) -> Any
+    """Decide which state instance to hand the kernel, and refuse silent mismatches.
+
+    The store is declared twice — ``[state] backend`` names it, the sub-table
+    configures it — because the kernel requires a backend name and cannot carry
+    the parameters (DESIGN.md G6). Requiring both to agree means neither a
+    forgotten sub-table nor a forgotten backend line can quietly produce a
+    router whose bandit never warms up.
+    """
+    backend = (profile.get("state") or {}).get("backend")
+    store_params = BanditStoreParams.from_mapping((profile.get(SECTION) or {}).get("bandit"))
+
+    if state is not None:
+        return state
+    if store_params is not None:
+        if backend != STORE_BACKEND:
+            raise ParamsError(
+                "[{0}.bandit.store] is configured but [state] backend is {1!r}; "
+                "set it to {2!r} (or pass the store as `state`)".format(SECTION, backend, STORE_BACKEND)
+            )
+        return BanditStore(store_params)
+    if backend == STORE_BACKEND:
+        raise ParamsError(
+            "[state] backend = {0!r} needs a [{1}.bandit.store] table, or a store passed "
+            "as `state`".format(STORE_BACKEND, SECTION)
+        )
+    if params.bandit is not None:
+        warnings.warn(
+            "[{0}.bandit] is enabled but the state backend {1!r} returns no retrieved "
+            "neighbours; the bandit will report `cold` on every request".format(SECTION, backend),
+            stacklevel=3,
+        )
+    return None
+
+
 def build_router(config, backend=None, state=None):
     # type: (Any, Optional[ComplexityBackend], Any) -> Any
     """Assemble a Router with x-router configured from ``config``.
 
     ``config`` is a TOML path or a profile mapping. The algorithm is registered
     under the profile's own ``algorithm`` name, so the profile stays the single
-    source of truth.
+    source of truth. A ``[x-router.bandit.store]`` table makes this build a
+    ``BanditStore`` and inject it, unless ``state`` is given.
     """
     from .. import Router  # deferred: the package imports this subpackage
     from .algorithm import specialize
@@ -136,6 +209,7 @@ def build_router(config, backend=None, state=None):
         raise ParamsError("profile must declare a non-empty `algorithm`")
 
     params = build_params(profile, backend=backend)
+    state = _resolve_state(profile, params, state)
 
     # Load the classifier now. At request time a failure degrades to the
     # heuristic on purpose, so a model that never loads would otherwise show up
@@ -149,3 +223,28 @@ def build_router(config, backend=None, state=None):
     if state is None:
         return Router.from_config(config)
     return Router.from_config(config, state=state)
+
+
+def build_judge(config, classifier=None):
+    # type: (Any, Any) -> Any
+    """Construct the judge a profile's ``[x-router.judge_model]`` table describes.
+
+    A local judge loads its weights here, so a bad path or device fails at
+    assembly, like the classifier. To share the router's classifier weights
+    (``share_classifier = true``) pass the same backend instance the router was
+    built with::
+
+        params = build_params(cfg)
+        router = build_router(cfg, backend=params.backend)
+        judge = build_judge(cfg, classifier=params.backend)
+    """
+    profile = load_profile(config)
+    section = profile.get(SECTION) or {}
+    table = section.get("judge_model")
+    if table is None:
+        raise ParamsError("profile has no [{0}.judge_model] table".format(SECTION))
+    judge = judge_from_config(table, classifier=classifier)
+    warmup = getattr(judge, "warmup", None)
+    if callable(warmup):
+        warmup()
+    return judge

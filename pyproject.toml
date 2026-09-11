@@ -13,6 +13,10 @@ requires-python = ">=3.8"
 # mode, which must be chosen explicitly with `enabled = false`: omitting the
 # [x-router.classifier_model] section is an error, not a fallback.
 x-router = ["torch>=2.0", "transformers>=5.0"]
+# The bandit's state (BanditStore) vectorises with numpy. Only needed when a
+# profile has an [x-router.bandit.store] table; the bandit's decision half is
+# pure Python and reads whatever state the profile names.
+x-router-bandit = ["numpy>=1.24"]
 
 [tool.maturin]
 manifest-path = "crates/py/Cargo.toml"

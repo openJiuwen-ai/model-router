@@ -10,6 +10,7 @@ import re
 from typing import Any, Optional, Sequence, Tuple, Type
 
 from ..algorithm_provider import AlgorithmProvider
+from .bandit import choose_tier
 from .complexity import classify
 from .types import ComplexityLevel, ParamsError, XRouterParams
 
@@ -100,14 +101,27 @@ class XRouter(AlgorithmProvider):
         if messages is None and isinstance(request, dict):
             messages = request.get("messages")
 
-        tier, source = classify(messages or (), params)
+        tier_llm, source = classify(messages or (), params)
+
+        # The bandit half. Pure: its only inputs are the tier, the retrieved
+        # neighbours and the parameters. Unconfigured, it does not run at all
+        # and the reasoning line is exactly what it was before it existed.
+        tier, bandit_note = tier_llm, ""
+        if params.bandit is not None:
+            retrieved = getattr(ctx, "retrieved", None) or ()
+            tier, verdict, neighbours = choose_tier(tier_llm, retrieved, params.bandit)
+            bandit_note = " tier_llm={0} bandit={1} neighbors={2}".format(
+                tier_llm.name, verdict, neighbours
+            )
+
         model, rule = decide_by_tier(tier, targets, params)
+        reasoning = "x-router: rule={0} tier={1} source={2}{3}".format(
+            rule, tier.name, source, bandit_note
+        )
 
         return {
             "selected_model_id": model,
-            "reasoning": "x-router: rule={0} tier={1} source={2}".format(
-                rule, tier.name, source
-            ),
+            "reasoning": reasoning,
             "is_answer_call": True,
         }
 
