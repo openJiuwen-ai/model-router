@@ -135,13 +135,9 @@ impl ReActAgent {
 
     // 上报反馈。
     fn report(&self, model: &str, outcome: Outcome) {
-        self.router.report(Feedback {
-            key: self.routing_key(),
-            selected_model_id: model.into(),
-            outcome,
-            latency_ms: 1,
-            cache_valid: None,
-        });
+        let mut feedback = Feedback::ok(self.routing_key(), model, 1);
+        feedback.call.as_mut().unwrap().outcome = outcome;
+        self.router.report(feedback);
     }
 
     /// 调模型：失败则 report Unavailable，下一轮 snapshot 会排除该目标。

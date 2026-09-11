@@ -11,7 +11,7 @@ pub mod state_view;
 
 pub use decision::Decision;
 pub use error::RouterError;
-pub use feedback::{Feedback, Outcome};
+pub use feedback::{CallFeedback, Extension, Feedback, FeedbackError, Outcome, Value};
 pub use request::{Message, RequestMetadata, RouteHint, RouteRequest, RoutingKey, TargetSet};
 pub use selection::ModelSelection;
 pub use state_view::{FeedbackStats, StateView};

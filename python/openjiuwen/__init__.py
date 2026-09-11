@@ -28,6 +28,8 @@ __all__ = [
     "RequestMetadata",
     "RoutingKey",
     "Feedback",
+    "CallFeedback",
+    "Extension",
     "StateView",
     "RouteContext",
     "register_state",
@@ -47,6 +49,8 @@ class Outcome:
 if TYPE_CHECKING:
     from ._openjiuwen import (
         Feedback,
+        CallFeedback,
+        Extension,
         Message,
         ModelSelection,
         RequestMetadata,
@@ -64,6 +68,8 @@ else:
     try:
         from ._openjiuwen import (
             Feedback,
+            CallFeedback,
+            Extension,
             Message,
             ModelSelection,
             RequestMetadata,
@@ -79,6 +85,8 @@ else:
     except ImportError:  # pragma: no cover
         NativeRouter = None  # type: ignore[misc, assignment]
         Feedback = None  # type: ignore[misc, assignment]
+        CallFeedback = None  # type: ignore[misc, assignment]
+        Extension = None  # type: ignore[misc, assignment]
         Message = None  # type: ignore[misc, assignment]
         ModelSelection = None  # type: ignore[misc, assignment]
         RequestMetadata = None  # type: ignore[misc, assignment]

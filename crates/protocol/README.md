@@ -27,7 +27,7 @@ crates/protocol/
     ├── decision.rs       # Decision
     ├── selection.rs      # ModelSelection（Decision 的跨边界投影）
     ├── state_view.rs     # StateView / FeedbackStats
-    ├── feedback.rs       # Feedback / Outcome
+    ├── feedback.rs       # Feedback / CallFeedback / Extension / Value / Outcome / FeedbackError
     └── error.rs          # RouterError
 ```
 
@@ -83,26 +83,41 @@ let key = req.routing_key();
 算法返回 `Decision`；跨 PyO3 / rail 覆盖槽时投影为 `ModelSelection`。宿主调完模型后构造 `Feedback`。
 
 ```rust
-use openjiuwen_protocol::{Decision, Feedback, ModelSelection, Outcome, RoutingKey};
+use openjiuwen_protocol::{CallFeedback, Extension, Feedback, ModelSelection, Outcome, RoutingKey, Value};
 
 let decision = Decision::answer("strong-cloud", "passthrough: first available target");
 let selection = ModelSelection::from(&decision);
 
 let feedback = Feedback {
+    version: openjiuwen_protocol::feedback::FEEDBACK_VERSION,
+    event_id: None,                            // 缺失表示未知
+    decision_id: decision.decision_id.clone(), // 由 runtime 在 route 返回前填充
     key: RoutingKey {
         session_id: "sess-1".into(),
         agent_id: "react-agent".into(),
     },
     selected_model_id: decision.selected_model_id.clone(),
-    outcome: Outcome::Ok, // Overflow / Unavailable 会驱动排除
-    latency_ms: 40,
-    cache_valid: None,
+    observed_at_ms: None,
+    call: Some(CallFeedback {
+        outcome: Outcome::Ok, // Overflow / Unavailable 会驱动排除
+        latency_ms: Some(40),
+        cache_valid: None,
+    }),
+    extensions: vec![Extension {
+        schema: "myapp.usage.v1".into(),
+        version: "1.0".into(),
+        data: Value::Object(vec![("tokens".into(), Value::Integer(128))]),
+    }],
 };
 let _ = selection;
 let _ = feedback;
 ```
 
-`Decision` 与 `ModelSelection` 字段相同（`selected_model_id` / `reasoning` / `is_answer_call`），差别只在「是否可执行」：前者是 runtime 内部返回值，后者是跨边界规格。runtime 北向契约 `RouterProvider::route` 返回 `ModelSelection`。
+也可以用 `Feedback::ok(key, model, latency_ms)` 构造成功反馈，用 `Feedback::delayed(key, model)` 表示结果未知（`call = None`）。
+
+`Feedback` 是**具体非泛型结构**：稳定核心字段由协议层定义，宿主私有信号放进 `extensions: Vec<Extension>`，未知 `schema` 仅做结构校验后透传，明确不承诺语义 —— 这样扩展演进不会迫使协议核心发版。
+
+`Decision` 与 `ModelSelection` 字段相同（`selected_model_id` / `reasoning` / `is_answer_call` / `decision_id`），差别只在「是否可执行」：前者是 runtime 内部返回值，后者是跨边界规格。runtime 北向契约 `RouterProvider::route` 返回 `ModelSelection`。`decision_id` 由 runtime 在 `decide_loop::run` 之后生成，算法既不生成也不接收它，以此保证算法纯函数属性。
 
 ## 主要模块
 
@@ -135,6 +150,8 @@ let _ = feedback;
 
 ### 反馈（`feedback.rs`）
 
+`Feedback` 字段：`version` / `event_id?` / `decision_id?` / `key` / `selected_model_id` / `observed_at_ms?` / `call?` / `extensions`。
+
 | `Outcome` | 含义 |
 |-----------|------|
 | `Ok` | 调用成功，可更新亲和 |
@@ -142,7 +159,9 @@ let _ = feedback;
 | `Unavailable` | 模型不可用，写入排除 hint |
 | `Rejected` | 语义失败，**不**驱动排除 |
 
-`Feedback.latency_ms` 为 `u64` 毫秒。`cache_valid` 可选，供状态层学习 KV cache 重建成本。
+`CallFeedback.latency_ms` 为 `Option<u64>` 毫秒，`cache_valid` 为 `Option<bool>`，供状态层学习 KV cache 重建成本。`call = None` 表示结果未知（延迟反馈），此时 state 不做任何更新。
+
+`Feedback::validate` 是唯一校验入口，`Router::try_report` 与 Python `PyRouter.report` 都先经它；失败返回 `FeedbackError` 且不写入 state。扩展载荷 `Value` 是零依赖 JSON 子集，预算按实际类型计费（字符串记 UTF-8 字节，其余节点记 8 字节），跨全部扩展累计。
 
 ### 错误（`error.rs`）
 
@@ -166,7 +185,7 @@ algorithm decide → Decision
         ↓ 可选投影
       ModelSelection（跨边界）
         ↓ 宿主自己调模型
-宿主  Feedback{key, selected_model_id, outcome, latency_ms}
+宿主  Feedback{key, selected_model_id, call{outcome, latency_ms}, extensions}
         ↓
 state 写回，下一轮 snapshot 才能看见
 ```

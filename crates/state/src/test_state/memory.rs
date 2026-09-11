@@ -35,6 +35,34 @@ impl MemoryState {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn only_calls_update_state() {
+        let state = MemoryState::default();
+        let key = RoutingKey::default();
+        state.report(Feedback::delayed(key.clone(), "late"));
+        assert_eq!(state.snapshot(&key), StateView::empty());
+        let success = Feedback::ok(key.clone(), "first", 1);
+        state.report(success.clone());
+        let before = state.snapshot(&key);
+        state.report(Feedback::delayed(key.clone(), "late"));
+        assert_eq!(state.snapshot(&key), before);
+        state.report(success);
+        assert_eq!(state.snapshot(&key).stats.sample_count, 2);
+        for outcome in [Outcome::Overflow, Outcome::Unavailable, Outcome::Rejected] {
+            let mut fb = Feedback::ok(key.clone(), "failed", 1);
+            fb.call.as_mut().unwrap().outcome = outcome;
+            state.report(fb);
+        }
+        let view = state.snapshot(&key);
+        assert_eq!(view.stats.sample_count, 5);
+        assert_eq!(view.affinity.as_deref(), Some("first"));
+        assert_eq!(view.exclusions, vec!["failed"]);
+    }
+}
+
 impl Default for MemoryState {
     fn default() -> Self {
         Self::with_defaults()
@@ -57,6 +85,9 @@ impl StateProvider for MemoryState {
 
     // report 按 Feedback.key（session_id + agent_id）更新内存里的一份 StateView，给下次 snapshot 用。
     fn report(&self, feedback: Feedback) {
+        let Some(call) = &feedback.call else {
+            return;
+        };
         let now = Instant::now();
         let mut map = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         // 如果内存里超过最大条目数，并且反馈的 key 不在内存里，则移除最旧的条目。
@@ -75,7 +106,7 @@ impl StateProvider for MemoryState {
         // 更新样本计数。
         entry.view.stats.sample_count = entry.view.stats.sample_count.saturating_add(1);
         // 根据反馈结果更新 StateView。
-        match feedback.outcome {
+        match call.outcome {
             // 溢出或不可用则添加到排除列表。
             Outcome::Overflow | Outcome::Unavailable => {
                 if !entry.view.exclusions.contains(&feedback.selected_model_id) {

@@ -27,6 +27,148 @@ class ExclusionStore(StateProvider):
             seen.append(feedback.selected_model_id)
 
 
+class FeedbackRecorder(StateProvider):
+    name = "feedback_recorder"
+
+    def __init__(self):
+        self.events = []
+
+    def snapshot(self, key):
+        return {}
+
+    def report(self, feedback):
+        self.events.append(feedback)
+
+
+def feedback_router():
+    from openjiuwen import Router
+    store = FeedbackRecorder()
+    router = Router.from_config({
+        "algorithm": "passthrough", "state": {"backend": "memory"},
+        "targets": {"models": ["model"]},
+    }, state=store)
+    return router, store
+
+
+def test_feedback_cross_language_roundtrip():
+    from openjiuwen import CallFeedback, Extension, Feedback, RoutingKey
+    router, store = feedback_router()
+    decision = router.route_sync({})
+    assert decision.decision_id
+    assert router.route_sync({}).decision_id != decision.decision_id
+    data = {"all": [None, True, False, -(2**63), 2**63 - 1, 1.25, "中文", {"nested": []}]}
+    fb = Feedback(RoutingKey("s", "a"), "model", call=CallFeedback("ok", None, False),
+                  event_id="evt", decision_id=decision.decision_id, observed_at_ms=2**64 - 1,
+                  extensions=[Extension("unknown.vendor", "1", data)])
+    expected = fb.to_dict()
+    router.report_sync(fb)
+    assert store.events[-1].to_dict() == expected
+    router.report_sync(expected)
+    assert store.events[-1].to_dict() == expected
+    assert Feedback.from_dict(expected).to_dict() == expected
+    assert store.events[-1].extensions[0].data == data
+    router.report_sync(Feedback(RoutingKey(), "model", call=None, extensions=[]))
+    assert store.events[-1].call is None
+    assert store.events[-1].outcome is None
+
+
+def test_feedback_legacy_apis():
+    from openjiuwen import Feedback, RoutingKey, ModelSelection
+    router, store = feedback_router()
+    fb = Feedback(RoutingKey("s", "a"), "model", "unavailable", 12, False)
+    fb.outcome = "ok"
+    fb.latency_ms = 14
+    fb.cache_valid = True
+    router.report_sync(fb)
+    assert store.events[-1].call.outcome == "ok"
+    assert store.events[-1].latency_ms == 14
+    assert store.events[-1].cache_valid is True
+    router.report_sync({"session_id": "s", "agent_id": "a", "selected_model_id": "model"})
+    assert store.events[-1].latency_ms == 0
+    assert store.events[-1].event_id is None
+    decision = router.route_sync({})
+    assert Feedback.ok(decision, 1).decision_id == decision.decision_id
+    assert Feedback.ok(ModelSelection("model", "old"), 1).decision_id is None
+    assert Feedback.ok({"target": "model", "decision_id": "dict-id"}, 1).decision_id == "dict-id"
+
+
+@pytest.mark.parametrize("data", [float("nan"), float("inf"), -float("inf"), 2**63, -(2**63)-1,
+                                  {1: "bad"}, (1, 2), {1, 2}, b"bytes", object(), "x" * 65537,
+                                  [None] * 256])
+def test_feedback_invalid_json_rejected(data):
+    from openjiuwen import Extension, Feedback, RoutingKey
+    router, store = feedback_router()
+    raw = {"selected_model_id": "model", "call": None,
+           "extensions": [{"schema": "unknown", "version": "1", "data": data}]}
+    for operation in [lambda: router.report_sync(raw), lambda: Feedback.from_dict(raw),
+                      lambda: Feedback(RoutingKey(), "model", call=None, extensions=raw["extensions"]),
+                      lambda: Extension("unknown", "1", data)]:
+        with pytest.raises((ValueError, TypeError, OverflowError)):
+            operation()
+    assert store.events == []
+
+
+def test_feedback_json_boundary_and_typed_validation():
+    from openjiuwen import CallFeedback, Extension, Feedback, RoutingKey
+    value = None
+    for _ in range(7):
+        value = [value]
+    assert Extension("s", "1", value).data == value
+    assert len(Extension("s", "1", "x" * 65534).data) == 65534
+    for value in [True, -1, 2**64, 1.5]:
+        for operation in [lambda: CallFeedback("ok", value),
+                          lambda: Feedback(RoutingKey(), "m", latency_ms=value),
+                          lambda: Feedback.ok({"target": "m"}, value)]:
+            with pytest.raises((ValueError, TypeError, OverflowError)):
+                operation()
+    for operation in [lambda: CallFeedback("ok", cache_valid=1),
+                      lambda: Feedback(RoutingKey(), "m", cache_valid=1)]:
+        with pytest.raises((ValueError, TypeError)):
+            operation()
+
+
+def test_feedback_depth_cycles_and_total_limits():
+    from openjiuwen import Feedback
+    router, store = feedback_router()
+    cycle = []
+    cycle.append(cycle)
+    deep = None
+    for _ in range(8):
+        deep = [deep]
+    for data in [cycle, deep]:
+        with pytest.raises(ValueError):
+            router.report_sync({"selected_model_id": "m", "extensions": [
+                {"schema": "s", "version": "1", "data": data}]})
+    for extensions in [
+        [{"schema": "s", "version": "1", "data": None}] * 33,
+        [{"schema": "s", "version": "1", "data": "x" * 40000}] * 2,
+        [{"schema": "s", "version": "1", "data": [None] * 150}] * 2,
+    ]:
+        with pytest.raises(ValueError):
+            Feedback.from_dict({"selected_model_id": "m", "extensions": extensions})
+    assert store.events == []
+
+
+@pytest.mark.parametrize("fields", [
+    {"version": 2}, {"version": 2**32}, {"version": True}, {"observed_at_ms": -1},
+    {"observed_at_ms": 2**64}, {"call": {"outcome": "bad"}},
+    {"call": {"outcome": "ok", "latency_ms": -1}},
+    {"call": {"outcome": "ok", "latency_ms": True}},
+    {"call": {"outcome": "ok", "cache_valid": 1}},
+    {"call": None, "outcome": "ok"},
+    {"extensions": [{"schema": "", "version": "1", "data": None}]},
+])
+def test_feedback_invalid_fields(fields):
+    from openjiuwen import Feedback
+    router, store = feedback_router()
+    raw = {"selected_model_id": "model", **fields}
+    with pytest.raises((ValueError, TypeError, OverflowError)):
+        router.report_sync(raw)
+    with pytest.raises((ValueError, TypeError, OverflowError)):
+        Feedback.from_dict(raw)
+    assert store.events == []
+
+
 def test_python_state_provider_is_not_an_algorithm():
     assert not hasattr(ExclusionStore(), "decide")
     assert issubclass(ExclusionStore, StateProvider)

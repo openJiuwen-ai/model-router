@@ -68,13 +68,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         match call_model(&decision.selected_model_id, prompt) {
             Ok(reply) => {
-                router.report(Feedback {
-                    key: request.routing_key(),
-                    selected_model_id: decision.selected_model_id.clone(),
-                    outcome: Outcome::Ok,
-                    latency_ms: 1,
-                    cache_valid: None,
-                });
+                let mut feedback = Feedback::ok(request.routing_key(), &decision.selected_model_id, 1);
+                feedback.decision_id = decision.decision_id.clone();
+                router.report(feedback);
                 println!("reply: {reply}");
                 return Ok(());
             }
@@ -83,13 +79,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "{} failed: {reason}, report Unavailable",
                     decision.selected_model_id
                 );
-                router.report(Feedback {
-                    key: request.routing_key(),
-                    selected_model_id: decision.selected_model_id.clone(),
-                    outcome: Outcome::Unavailable,
-                    latency_ms: 1,
-                    cache_valid: None,
-                });
+                let mut feedback = Feedback::ok(request.routing_key(), &decision.selected_model_id, 1);
+                feedback.decision_id = decision.decision_id.clone();
+                feedback.call.as_mut().unwrap().outcome = Outcome::Unavailable;
+                router.report(feedback);
                 exclusions.push(decision.selected_model_id.clone());
             }
         }

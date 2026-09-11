@@ -280,6 +280,7 @@ pub struct PyModelSelection {
     pub selected_model_id: String,
     pub reasoning: String,
     pub is_answer_call: bool,
+    pub decision_id: Option<String>,
 }
 
 #[pymethods]
@@ -291,6 +292,7 @@ impl PyModelSelection {
             selected_model_id,
             reasoning,
             is_answer_call,
+            decision_id: None,
         }
     }
 
@@ -308,6 +310,7 @@ impl PyModelSelection {
             selected_model_id: sel.selected_model_id,
             reasoning: sel.reasoning,
             is_answer_call: sel.is_answer_call,
+            decision_id: sel.decision_id,
         }
     }
 
@@ -316,6 +319,7 @@ impl PyModelSelection {
             selected_model_id: self.selected_model_id.clone(),
             reasoning: self.reasoning.clone(),
             is_answer_call: self.is_answer_call,
+            decision_id: self.decision_id.clone(),
         }
     }
 }
@@ -323,46 +327,129 @@ impl PyModelSelection {
 #[pyclass(name = "Feedback")]
 #[derive(Clone, Debug)]
 pub struct PyFeedback {
-    #[pyo3(get, set)]
-    pub key: PyRoutingKey,
-    #[pyo3(get, set)]
-    pub selected_model_id: String,
-    #[pyo3(get, set)]
+    pub inner: Feedback,
+}
+
+#[pyclass(name = "CallFeedback", get_all)]
+#[derive(Clone, Debug)]
+pub struct PyCallFeedback {
     pub outcome: String,
-    #[pyo3(get, set)]
-    pub latency_ms: u64,
-    #[pyo3(get, set)]
+    pub latency_ms: Option<u64>,
     pub cache_valid: Option<bool>,
+}
+
+#[pymethods]
+impl PyCallFeedback {
+    #[new]
+    #[pyo3(signature = (outcome, latency_ms=None, cache_valid=None))]
+    fn new(
+        outcome: &str,
+        latency_ms: Option<&Bound<'_, PyAny>>,
+        cache_valid: Option<bool>,
+    ) -> PyResult<Self> {
+        let latency_ms = latency_ms.map(convert::unsigned_integer).transpose()?;
+        Ok(Self {
+            outcome: outcome_name(convert::parse_outcome(outcome)?).into(),
+            latency_ms,
+            cache_valid,
+        })
+    }
+}
+
+pub fn outcome_name(outcome: openjiuwen_protocol::Outcome) -> &'static str {
+    use openjiuwen_protocol::Outcome::*;
+    match outcome {
+        Ok => "ok",
+        Overflow => "overflow",
+        Unavailable => "unavailable",
+        Rejected => "rejected",
+    }
+}
+
+#[pyclass(name = "Extension")]
+#[derive(Clone, Debug)]
+pub struct PyExtension {
+    pub inner: openjiuwen_protocol::Extension,
+}
+
+#[pymethods]
+impl PyExtension {
+    #[new]
+    fn new(schema: String, version: String, data: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let inner = openjiuwen_protocol::Extension {
+            schema,
+            version,
+            data: convert::extract_json(data)?,
+        };
+        inner.validate().map_err(convert::feedback_error)?;
+        Ok(Self { inner })
+    }
+    #[getter]
+    fn schema(&self) -> &str {
+        &self.inner.schema
+    }
+    #[getter]
+    fn version(&self) -> &str {
+        &self.inner.version
+    }
+    #[getter]
+    fn data<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        convert::json_to_py(py, &self.inner.data)
+    }
 }
 
 #[pymethods]
 impl PyFeedback {
     #[new]
-    #[pyo3(signature = (key, selected_model_id, outcome="ok", latency_ms=0, cache_valid=None))]
+    #[pyo3(signature = (key, selected_model_id, outcome=None, latency_ms=None, cache_valid=None, **kwargs))]
     fn new(
-        key: PyRoutingKey,
+        key: &Bound<'_, PyAny>,
         selected_model_id: String,
-        outcome: &str,
-        latency_ms: u64,
+        outcome: Option<&str>,
+        latency_ms: Option<&Bound<'_, PyAny>>,
         cache_valid: Option<bool>,
+        kwargs: Option<&Bound<'_, pyo3::types::PyDict>>,
     ) -> PyResult<Self> {
-        convert::parse_outcome(outcome)?;
+        // `None` 即“未提供”哨兵：与 dict 路径的 `Some(v) if !v.is_none()` 判定保持一致。
+        // 不能用“是否等于默认值”判断，否则显式传入 outcome="ok" / latency_ms=0 会被当成未提供。
+        let legacy_latency = latency_ms.map(convert::unsigned_integer).transpose()?;
+        let legacy_provided =
+            outcome.is_some() || legacy_latency.is_some() || cache_valid.is_some();
+        let d = match kwargs {
+            Some(d) => d.copy()?,
+            None => pyo3::types::PyDict::new(key.py()),
+        };
+        d.set_item("key", key)?;
+        d.set_item("selected_model_id", selected_model_id)?;
+        if d.contains("call")? {
+            // 新旧两种表达互斥；显式 `call=None` 表示延迟反馈，不写旧字段。
+            if legacy_provided {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "call cannot be combined with legacy call fields",
+                ));
+            }
+        } else {
+            d.set_item("outcome", outcome.unwrap_or("ok"))?;
+            d.set_item("latency_ms", legacy_latency.unwrap_or(0))?;
+            d.set_item("cache_valid", cache_valid)?;
+        }
+        Self::from_dict(&d)
+    }
+    #[staticmethod]
+    fn from_dict(d: &Bound<'_, pyo3::types::PyDict>) -> PyResult<Self> {
         Ok(Self {
-            key,
-            selected_model_id,
-            outcome: outcome.to_ascii_lowercase(),
-            latency_ms,
-            cache_valid,
+            inner: convert::extract_feedback(d.as_any())?,
         })
     }
-
-    /// `Feedback.ok(decision, latency_ms=..., key=...)`。
+    fn to_dict<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+        convert::feedback_to_dict(py, &self.inner)
+    }
     #[classmethod]
     #[pyo3(signature = (decision, latency_ms, *, key=None, session_id=None, agent_id=None, selected_model_id=None, cache_valid=None, outcome="ok"))]
     fn ok(
         _cls: &Bound<'_, PyType>,
         decision: Bound<'_, PyAny>,
-        latency_ms: u64,
+        latency_ms: &Bound<'_, PyAny>,
         key: Option<Bound<'_, PyAny>>,
         session_id: Option<String>,
         agent_id: Option<String>,
@@ -370,51 +457,133 @@ impl PyFeedback {
         cache_valid: Option<bool>,
         outcome: &str,
     ) -> PyResult<Self> {
+        let latency_ms = convert::unsigned_integer(latency_ms)?;
         let model = match selected_model_id {
-            Some(id) => id,
+            Some(m) => m,
             None => convert::selection_model_id(&decision)?,
         };
-        let routing_key = match key {
+        let key = match key {
             Some(k) => convert::extract_routing_key(&k)?,
             None => RoutingKey {
                 session_id: session_id.unwrap_or_default(),
                 agent_id: agent_id.unwrap_or_default(),
             },
         };
-        convert::parse_outcome(outcome)?;
-        Ok(Self {
-            key: PyRoutingKey::from(&routing_key),
-            selected_model_id: model,
-            outcome: outcome.to_ascii_lowercase(),
-            latency_ms,
-            cache_valid,
+        let mut inner = Feedback::ok(key, model, latency_ms);
+        inner.call.as_mut().unwrap().outcome = convert::parse_outcome(outcome)?;
+        inner.call.as_mut().unwrap().cache_valid = cache_valid;
+        inner.decision_id = if let Ok(d) = decision.downcast::<pyo3::types::PyDict>() {
+            d.get_item("decision_id")?
+                .map(|v| v.extract())
+                .transpose()?
+                .flatten()
+        } else if decision.hasattr("decision_id")? {
+            decision.getattr("decision_id")?.extract()?
+        } else {
+            None
+        };
+        Ok(Self { inner })
+    }
+    #[getter]
+    fn key(&self) -> PyRoutingKey {
+        PyRoutingKey::from(&self.inner.key)
+    }
+    #[setter]
+    fn set_key(&mut self, value: PyRoutingKey) {
+        self.inner.key = value.native();
+    }
+    #[getter]
+    fn selected_model_id(&self) -> &str {
+        &self.inner.selected_model_id
+    }
+    #[setter]
+    fn set_selected_model_id(&mut self, value: String) {
+        self.inner.selected_model_id = value;
+    }
+    #[getter]
+    fn version(&self) -> u32 {
+        self.inner.version
+    }
+    #[getter]
+    fn event_id(&self) -> Option<String> {
+        self.inner.event_id.clone()
+    }
+    #[setter]
+    fn set_event_id(&mut self, value: Option<String>) {
+        self.inner.event_id = value;
+    }
+    #[getter]
+    fn decision_id(&self) -> Option<String> {
+        self.inner.decision_id.clone()
+    }
+    #[setter]
+    fn set_decision_id(&mut self, value: Option<String>) {
+        self.inner.decision_id = value;
+    }
+    #[getter]
+    fn observed_at_ms(&self) -> Option<u64> {
+        self.inner.observed_at_ms
+    }
+    #[getter]
+    fn call(&self) -> Option<PyCallFeedback> {
+        self.inner.call.as_ref().map(|c| PyCallFeedback {
+            outcome: outcome_name(c.outcome).into(),
+            latency_ms: c.latency_ms,
+            cache_valid: c.cache_valid,
         })
+    }
+    #[getter]
+    fn extensions(&self) -> Vec<PyExtension> {
+        self.inner
+            .extensions
+            .iter()
+            .cloned()
+            .map(|inner| PyExtension { inner })
+            .collect()
+    }
+    #[getter]
+    fn outcome(&self) -> Option<&str> {
+        self.inner.call.as_ref().map(|c| outcome_name(c.outcome))
+    }
+    #[setter]
+    fn set_outcome(&mut self, value: &str) -> PyResult<()> {
+        let outcome = convert::parse_outcome(value)?;
+        self.legacy_call()?.outcome = outcome;
+        Ok(())
+    }
+    #[getter]
+    fn latency_ms(&self) -> Option<u64> {
+        self.inner.call.as_ref().and_then(|c| c.latency_ms)
+    }
+    #[setter]
+    fn set_latency_ms(&mut self, value: &Bound<'_, PyAny>) -> PyResult<()> {
+        let value = convert::unsigned_integer(value)?;
+        self.legacy_call()?.latency_ms = Some(value);
+        Ok(())
+    }
+    #[getter]
+    fn cache_valid(&self) -> Option<bool> {
+        self.inner.call.as_ref().and_then(|c| c.cache_valid)
+    }
+    #[setter]
+    fn set_cache_valid(&mut self, value: Option<bool>) -> PyResult<()> {
+        self.legacy_call()?.cache_valid = value;
+        Ok(())
     }
 }
 
 impl PyFeedback {
-    pub fn from_native(fb: &Feedback) -> Self {
-        Self {
-            key: PyRoutingKey::from(&fb.key),
-            selected_model_id: fb.selected_model_id.clone(),
-            outcome: match fb.outcome {
-                openjiuwen_protocol::Outcome::Ok => "ok".into(),
-                openjiuwen_protocol::Outcome::Overflow => "overflow".into(),
-                openjiuwen_protocol::Outcome::Unavailable => "unavailable".into(),
-                openjiuwen_protocol::Outcome::Rejected => "rejected".into(),
-            },
-            latency_ms: fb.latency_ms,
-            cache_valid: fb.cache_valid,
-        }
+    fn legacy_call(&mut self) -> PyResult<&mut openjiuwen_protocol::CallFeedback> {
+        self.inner
+            .call
+            .as_mut()
+            .ok_or_else(|| pyo3::exceptions::PyValueError::new_err("feedback has no call"))
     }
-
+    pub fn from_native(fb: &Feedback) -> Self {
+        Self { inner: fb.clone() }
+    }
     pub fn native(&self) -> PyResult<Feedback> {
-        Ok(Feedback {
-            key: self.key.native(),
-            selected_model_id: self.selected_model_id.clone(),
-            outcome: convert::parse_outcome(&self.outcome)?,
-            latency_ms: self.latency_ms,
-            cache_valid: self.cache_valid,
-        })
+        self.inner.validate().map_err(convert::feedback_error)?;
+        Ok(self.inner.clone())
     }
 }
