@@ -265,7 +265,9 @@ pub trait AlgorithmProvider: Send + Sync {
 
 设计纪律：
 
-- `decide` 不做 I/O、不调用模型、不访问 state。
+- `decide` 不调用**被选中的目标模型**（调用目标模型是宿主的职责）、不访问 state。
+- 允许自带决策辅助模型（如复杂度分类器）；但调用应尽量保持无状态纯调用，
+  避免引入缓存、会话粘性等可变状态，以免削弱可重放性。这是实现者自身的责任。
 - 不读取系统时钟或全局随机数；需要随机性时只使用 `ctx.seed`。
 - 相同输入必须得到相同输出，便于重放和表驱动测试。
 - `ctx.view` 为空时仍须返回合法决策或明确的 `NoTarget`。
@@ -1005,7 +1007,7 @@ let artifact = job.run_once(&MyTrainer);
 - Algorithm 在空 `StateView` 下仍可工作。
 - 需要精细检索时实现 `StateProvider::query`，并通过 `RouteHint.state_query` 传入检索意图；只实现 `snapshot` 的插件无需改动。
 - `query` 返回的检索命中是 hint：算法必须能在 `retrieved` 为空时降级。
-- Algorithm/Evolving 不执行 I/O，也不保存跨调用可变状态。
+- Algorithm/Evolving 不保存跨调用可变状态；算法可调用自带的决策辅助模型，但不得调用被选中的目标模型。
 - State 的远程故障路径返回空视图，不能无限等待。
 - 自定义插件使用唯一、稳定的 `name`。
 - 私有信号放进 `Feedback.extensions` 并自带版本；不要为业务字段改动协议核心。
