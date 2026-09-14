@@ -173,7 +173,7 @@ pub fn extract_feedback(obj: &Bound<'_, PyAny>) -> PyResult<openjiuwen_protocol:
         if ![
             "version",
             "event_id",
-            "decision_id",
+            "route_id",
             "key",
             "session_id",
             "agent_id",
@@ -267,7 +267,7 @@ pub fn extract_feedback(obj: &Bound<'_, PyAny>) -> PyResult<openjiuwen_protocol:
         version: u32::try_from(version)
             .map_err(|_| PyValueError::new_err("version out of u32 range"))?,
         event_id: opt_dict_str(dict, "event_id")?,
-        decision_id: opt_dict_str(dict, "decision_id")?,
+        route_id: opt_dict_str(dict, "route_id")?,
         key,
         selected_model_id: required(dict, "selected_model_id")?.extract()?,
         observed_at_ms: strict_u64(dict, "observed_at_ms")?,
@@ -286,7 +286,7 @@ pub fn feedback_to_dict<'py>(
     let d = PyDict::new(py);
     d.set_item("version", fb.version)?;
     d.set_item("event_id", &fb.event_id)?;
-    d.set_item("decision_id", &fb.decision_id)?;
+    d.set_item("route_id", &fb.route_id)?;
     let key = PyDict::new(py);
     key.set_item("session_id", &fb.key.session_id)?;
     key.set_item("agent_id", &fb.key.agent_id)?;
@@ -527,13 +527,13 @@ pub fn extract_state_query(obj: &Bound<'_, PyAny>) -> PyResult<StateQuery> {
             Some(v) if !v.is_none() => extract_extensions(&v)?,
             _ => Vec::new(),
         };
-        // dict 形式不接受 `decision_id`：那是 runtime 的关联字段，宿主填了也会被覆盖。
+        // dict 形式不接受 `route_id`：那是 runtime 的关联字段，宿主填了也会被覆盖。
         let query = StateQuery {
             text,
             vector,
             top_k,
             extensions,
-            decision_id: None,
+            route_id: None,
         };
         query
             .validate()
@@ -572,7 +572,7 @@ pub fn extract_decision(obj: &Bound<'_, PyAny>) -> PyResult<openjiuwen_protocol:
             .transpose()?
             .unwrap_or(true);
         return Ok(openjiuwen_protocol::Decision {
-            decision_id: opt_dict_str(dict, "decision_id")?,
+            route_id: opt_dict_str(dict, "route_id")?,
             selected_model_id: selected,
             reasoning,
             is_answer_call,
@@ -580,8 +580,8 @@ pub fn extract_decision(obj: &Bound<'_, PyAny>) -> PyResult<openjiuwen_protocol:
     }
     if obj.hasattr("selected_model_id")? {
         return Ok(openjiuwen_protocol::Decision {
-            decision_id: if obj.hasattr("decision_id")? {
-                obj.getattr("decision_id")?.extract()?
+            route_id: if obj.hasattr("route_id")? {
+                obj.getattr("route_id")?.extract()?
             } else {
                 None
             },

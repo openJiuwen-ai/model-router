@@ -156,13 +156,13 @@ def test_retrieved_from_a_python_state_drives_the_override():
         name = "bandit-neighbours"
 
         def __init__(self):
-            self.decision_ids = []
+            self.route_ids = []
 
         def snapshot(self, key):
             return {}
 
         def query(self, key, query):
-            self.decision_ids.append(query.decision_id)
+            self.route_ids.append(query.route_id)
             return {"view": {}, "retrieved": [dict(it, id="n{0}".format(i)) for i, it in enumerate(STRONG_COMPLEX)]}
 
         def report(self, feedback):
@@ -179,7 +179,7 @@ def test_retrieved_from_a_python_state_drives_the_override():
 
     cold = router.route_sync(request)                       # no hint: state not queried, bandit cold
     assert cold.selected_model_id == "local" and cold.reasoning.endswith("bandit=cold neighbors=0")
-    assert state.decision_ids == []
+    assert state.route_ids == []
     warm = router.route_sync(request, RouteHint(state_query=StateQuery(text="do the thing")))
     assert warm.selected_model_id == "cloud-a" and "bandit=override neighbors=3" in warm.reasoning
-    assert state.decision_ids == [warm.decision_id]
+    assert state.route_ids == [warm.route_id]

@@ -46,7 +46,7 @@ maturin develop
 | `RequestMetadata` | `session_id` / `agent_id` → `routing_key()` |
 | `RoutingKey` | 与 `Feedback.key` 必须同一把，排除才对得上 |
 | `RouteHint` | 每请求 hint：`cache_affinity` + `state_query`（可选检索入参） |
-| `ModelSelection`（`Decision`） | `route` 出参；宿主拿 `selected_model_id` 去调模型，并保留 `decision_id` 以便 `report` 关联 |
+| `ModelSelection`（`Decision`） | `route` 出参；宿主拿 `selected_model_id` 去调模型，并保留 `route_id` 以便 `report` 关联 |
 | `Feedback` | 回报：`key` + `selected_model_id` + `call`（`outcome` / `latency_ms?` / `cache_valid?`）+ `extensions` |
 | `CallFeedback` | 单次调用结果；`call=None` 表示延迟反馈，state 不更新 |
 | `Extension` | `schema` / `version` / `data`；宿主私有信号走这里，未知 schema 只做结构校验 |
@@ -54,7 +54,7 @@ maturin develop
 | `RetrievedItem` | 单条命中：`id` / `score` / `data?`；也可用 dict 传入 |
 | `Outcome` | `OK` / `OVERFLOW` / `UNAVAILABLE` / `REJECTED` |
 
-`Feedback.ok(decision, latency_ms, *, key=..., session_id=..., agent_id=..., outcome=...)` 从决策上取模型名，并自动带上其 `decision_id`。`OVERFLOW` / `UNAVAILABLE` 写入 state 排除表；`REJECTED` 不排除；`OK` 更新亲和。
+`Feedback.ok(decision, latency_ms, *, key=..., session_id=..., agent_id=..., outcome=...)` 从决策上取模型名，并自动带上其 `route_id`。`OVERFLOW` / `UNAVAILABLE` 写入 state 排除表；`REJECTED` 不排除；`OK` 更新亲和。
 
 `report_sync(feedback)` 接受 `Feedback` 实例或 dict，两条路径语义一致：`call` 与旧式顶层字段（`outcome` / `latency_ms` / `cache_valid`）互斥，同时传会报错。非法反馈（版本不符、schema 为空、超出嵌套 / 字节 / 元素 / 条数预算、非有限数、整数越界、重复键）抛 `ValueError`，且**不写入 state**；校验统一在 Rust 侧 `Router::try_report` 完成。
 

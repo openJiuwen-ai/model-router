@@ -10,7 +10,7 @@ pub struct ModelSelection {
     pub selected_model_id: String,
     pub reasoning: String,
     pub is_answer_call: bool,
-    pub decision_id: Option<String>,
+    pub route_id: Option<String>,
 }
 
 impl From<&Decision> for ModelSelection {
@@ -19,7 +19,7 @@ impl From<&Decision> for ModelSelection {
             selected_model_id: d.selected_model_id.clone(),
             reasoning: d.reasoning.clone(),
             is_answer_call: d.is_answer_call,
-            decision_id: d.decision_id.clone(),
+            route_id: d.route_id.clone(),
         }
     }
 }

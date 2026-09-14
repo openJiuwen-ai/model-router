@@ -9,8 +9,8 @@ pub struct Decision {
     pub reasoning: String,
     /// 是否应答调用。本架构已收敛为仅应答，默认 `true`。
     pub is_answer_call: bool,
-    /// runtime 生成的唯一决策 id；算法对象无需自己生成。
-    pub decision_id: Option<String>,
+    /// 一次 `route` 的关联 id，由 runtime 生成；算法对象无需自己生成。
+    pub route_id: Option<String>,
 }
 
 impl Decision {
@@ -20,7 +20,7 @@ impl Decision {
             selected_model_id: selected_model_id.into(), // 选中目标的语义名
             reasoning: reasoning.into(),                 // 决策理由
             is_answer_call: true,                        // 默认应答
-            decision_id: None,                           // 由 runtime 填充
+            route_id: None,                           // 由 runtime 填充
         }
     }
 }

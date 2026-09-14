@@ -54,11 +54,11 @@ def test_feedback_cross_language_roundtrip():
     from openjiuwen import CallFeedback, Extension, Feedback, RoutingKey
     router, store = feedback_router()
     decision = router.route_sync({})
-    assert decision.decision_id
-    assert router.route_sync({}).decision_id != decision.decision_id
+    assert decision.route_id
+    assert router.route_sync({}).route_id != decision.route_id
     data = {"all": [None, True, False, -(2**63), 2**63 - 1, 1.25, "中文", {"nested": []}]}
     fb = Feedback(RoutingKey("s", "a"), "model", call=CallFeedback("ok", None, False),
-                  event_id="evt", decision_id=decision.decision_id, observed_at_ms=2**64 - 1,
+                  event_id="evt", route_id=decision.route_id, observed_at_ms=2**64 - 1,
                   extensions=[Extension("unknown.vendor", "1", data)])
     expected = fb.to_dict()
     router.report_sync(fb)
@@ -87,9 +87,9 @@ def test_feedback_legacy_apis():
     assert store.events[-1].latency_ms == 0
     assert store.events[-1].event_id is None
     decision = router.route_sync({})
-    assert Feedback.ok(decision, 1).decision_id == decision.decision_id
-    assert Feedback.ok(ModelSelection("model", "old"), 1).decision_id is None
-    assert Feedback.ok({"target": "model", "decision_id": "dict-id"}, 1).decision_id == "dict-id"
+    assert Feedback.ok(decision, 1).route_id == decision.route_id
+    assert Feedback.ok(ModelSelection("model", "old"), 1).route_id is None
+    assert Feedback.ok({"target": "model", "route_id": "dict-id"}, 1).route_id == "dict-id"
 
 
 @pytest.mark.parametrize("data", [float("nan"), float("inf"), -float("inf"), 2**63, -(2**63)-1,
@@ -345,8 +345,8 @@ def test_state_query_reaches_python_and_returns_retrieved():
     assert item.data == {"model": "strong-cloud"}
 
 
-def test_state_query_carries_the_decision_id_the_selection_returns():
-    """runtime 在调 `query` 前生成 decision_id 并注入，state 与宿主看到的是同一个值。"""
+def test_state_query_carries_the_route_id_the_selection_returns():
+    """runtime 在调 `query` 前生成 route_id 并注入，state 与宿主看到的是同一个值。"""
     pytest.importorskip("openjiuwen._openjiuwen")
     from openjiuwen import Feedback, RouteHint, Router, StateProvider, StateQuery
 
@@ -361,11 +361,11 @@ def test_state_query_carries_the_decision_id_the_selection_returns():
             return {}
 
         def query(self, key, query):
-            self.query_ids.append(query.decision_id)
+            self.query_ids.append(query.route_id)
             return {"view": {}, "retrieved": []}
 
         def report(self, feedback):
-            self.report_ids.append(feedback.decision_id)
+            self.report_ids.append(feedback.route_id)
 
     store = IdRecorder()
     router = Router.from_config({
@@ -373,24 +373,24 @@ def test_state_query_carries_the_decision_id_the_selection_returns():
         "targets": {"models": ["model"]},
     }, state=store)
 
-    # 宿主构造的查询里 decision_id 始终为空，且不可赋值。
+    # 宿主构造的查询里 route_id 始终为空，且不可赋值。
     query = StateQuery(text="hello")
-    assert query.decision_id is None
+    assert query.route_id is None
     with pytest.raises(AttributeError):
-        query.decision_id = "host-filled"
+        query.route_id = "host-filled"
 
     selection = router.route_sync({"session_id": "s", "agent_id": "a"}, RouteHint(state_query=query))
-    assert selection.decision_id
-    assert store.query_ids == [selection.decision_id]
+    assert selection.route_id
+    assert store.query_ids == [selection.route_id]
 
     # 同一个 id 随 Feedback 回到 state，形成 query → report 的关联。
     router.report_sync(Feedback.ok(selection, 5, session_id="s", agent_id="a"))
-    assert store.report_ids == [selection.decision_id]
+    assert store.report_ids == [selection.route_id]
 
     # 没有检索意图：不调 query，id 照常生成且不同。
     plain = router.route_sync({"session_id": "s", "agent_id": "a"})
-    assert plain.decision_id and plain.decision_id != selection.decision_id
-    assert store.query_ids == [selection.decision_id]
+    assert plain.route_id and plain.route_id != selection.route_id
+    assert store.query_ids == [selection.route_id]
 
 
 def test_query_failure_falls_back_to_snapshot():

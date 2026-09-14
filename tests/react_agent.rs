@@ -133,9 +133,10 @@ impl ReActAgent {
         Ok(decision)
     }
 
-    // 上报反馈。
-    fn report(&self, model: &str, outcome: Outcome) {
-        let mut feedback = Feedback::ok(self.routing_key(), model, 1);
+    // 上报反馈。把本次 `route` 返回的 `route_id` 带回，便于 state 把 query 与 report 对上。
+    fn report(&self, decision: &Decision, outcome: Outcome) {
+        let mut feedback = Feedback::ok(self.routing_key(), &decision.selected_model_id, 1);
+        feedback.route_id = decision.route_id.clone();
         feedback.call.as_mut().unwrap().outcome = outcome;
         self.router.report(feedback);
     }
@@ -146,7 +147,7 @@ impl ReActAgent {
             let decision = self.route(prompt, trace)?;
             match self.backend.invoke(&decision.selected_model_id, prompt) {    // 调用模型。
                 Ok(text) => {    // 调用成功。
-                    self.report(&decision.selected_model_id, Outcome::Ok);    // 上报反馈。
+                    self.report(&decision, Outcome::Ok);    // 上报反馈。
                     return Ok((decision, text));
                 }
                 Err(reason) => {
@@ -154,7 +155,7 @@ impl ReActAgent {
                         "  {} failed ({reason}), report Unavailable",
                         decision.selected_model_id
                     );
-                    self.report(&decision.selected_model_id, Outcome::Unavailable);    // 上报反馈。    
+                    self.report(&decision, Outcome::Unavailable);    // 上报反馈。    
                 }
             }
         }

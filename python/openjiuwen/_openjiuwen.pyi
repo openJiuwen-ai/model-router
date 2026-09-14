@@ -24,6 +24,8 @@ class StateQuery:
     vector: Optional[List[float]]
     top_k: Optional[int]
     extensions: List[Extension]
+    @property
+    def route_id(self) -> Optional[str]: ...
     def __init__(
         self,
         text: Optional[str] = ...,
@@ -90,7 +92,7 @@ class ModelSelection:
     selected_model_id: str
     reasoning: str
     is_answer_call: bool
-    decision_id: Optional[str]
+    route_id: Optional[str]
     def __init__(
         self,
         selected_model_id: str,
@@ -126,7 +128,7 @@ class Feedback:
     @property
     def version(self) -> int: ...
     event_id: Optional[str]
-    decision_id: Optional[str]
+    route_id: Optional[str]
     key: RoutingKey
     selected_model_id: str
     @property
@@ -148,7 +150,7 @@ class Feedback:
         *,
         version: int = ...,
         event_id: Optional[str] = ...,
-        decision_id: Optional[str] = ...,
+        route_id: Optional[str] = ...,
         observed_at_ms: Optional[int] = ...,
         call: Optional[Union[CallFeedback, dict]] = ...,
         extensions: List[Union[Extension, dict]] = ...,

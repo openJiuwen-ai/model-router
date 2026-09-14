@@ -88,13 +88,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ..Default::default()
     };
 
-    // route 返回前会填充 decision_id（runtime 生成，算法不参与）。
+    // route 返回前会填充 route_id（runtime 生成，算法不参与）。
     let decision = router.route(&req, &RouteHint::default())?;
     // 宿主自己调用 decision.selected_model_id 对应的模型
 
     // Feedback::ok 构造成功反馈；随后补齐关联字段。
     let mut feedback = Feedback::ok(req.routing_key(), &decision.selected_model_id, 40);
-    feedback.decision_id = decision.decision_id.clone();
+    feedback.route_id = decision.route_id.clone();
     feedback.observed_at_ms = Some(1_700_000_000_000);
     // Overflow / Unavailable 写入排除 hint；Rejected 不驱动排除。
     feedback.call.as_mut().unwrap().outcome = Outcome::Ok;

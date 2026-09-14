@@ -99,7 +99,9 @@ impl Router {
         let seed = self.seed.fetch_add(1, Ordering::Relaxed);
         // 先于读 state 生成：state 的 `query` 需要它来关联之后带同一 id 回来的
         // 反馈。算法仍然拿不到它——它不进 RouteContext，只在 run 返回后写入 Decision。
-        let decision_id = Self::next_decision_id();
+        // 路由和反馈是拆开的两步：route 当时只知道请求文本，真正的调用结果（延迟、成败、打分）要等宿主跑完模型才 report。
+        // 中间没有别的主键能把这两次调用绑成同一笔决策，所以 runtime 先发一个 id。
+        let route_id = Self::next_route_id();
         let mut decision = decide_loop::run(
             // 运行决策循环。
             self.algorithm.as_ref(),
@@ -108,14 +110,14 @@ impl Router {
             hint,
             &self.targets,
             seed,
-            &decision_id,
+            &route_id,
         )?;
-        decision.decision_id = Some(decision_id);
+        decision.route_id = Some(route_id);
         Ok(decision)
     }
 
     /// 进程内序列保证同进程不同 Router 不重号；不承诺分布式唯一或去重。
-    fn next_decision_id() -> String {
+    fn next_route_id() -> String {
         static NEXT_ID: AtomicU64 = AtomicU64::new(0);
         let sequence = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         let time = std::time::SystemTime::now()
@@ -204,13 +206,13 @@ models = ["alpha", "beta"]
             ..RouteRequest::default()
         };
         let d = router.route(&req, &RouteHint::default()).expect("route");
-        assert!(d.decision_id.as_ref().is_some_and(|id| !id.is_empty()));
+        assert!(d.route_id.as_ref().is_some_and(|id| !id.is_empty()));
         let second = Router::from_toml(toml)
             .unwrap()
             .route(&req, &RouteHint::default())
             .unwrap();
-        assert_ne!(d.decision_id, second.decision_id);
-        assert!(Decision::answer("alpha", "algorithm").decision_id.is_none());
+        assert_ne!(d.route_id, second.route_id);
+        assert!(Decision::answer("alpha", "algorithm").route_id.is_none());
         assert_eq!(d.selected_model_id, "alpha");
         assert!(d.is_answer_call);
 
@@ -218,8 +220,8 @@ models = ["alpha", "beta"]
         let selection = plugin
             .route(&req, &RouteHint::default())
             .expect("plugin route");
-        assert!(selection.decision_id.is_some());
-        assert_ne!(selection.decision_id, d.decision_id);
+        assert!(selection.route_id.is_some());
+        assert_ne!(selection.route_id, d.route_id);
         assert_eq!(selection.selected_model_id, "alpha");
         assert_eq!(plugin.algorithm_name(), "passthrough");
     }
@@ -279,10 +281,10 @@ models = ["alpha"]
         assert_eq!(router.state.snapshot(&key).stats.sample_count, 1);
     }
 
-    /// state 的 `query` 收到的 `decision_id` 必须与 `route` 返回的一致，且覆盖宿主自填的值；
+    /// state 的 `query` 收到的 `route_id` 必须与 `route` 返回的一致，且覆盖宿主自填的值；
     /// 没有检索意图时不调 `query`，id 照常生成。
     #[test]
-    fn query_receives_the_decision_id_the_decision_carries() {
+    fn query_receives_the_route_id_the_decision_carries() {
         use openjiuwen_protocol::{RoutingKey, StateQuery, StateQueryError, StateSnapshot, StateView};
         use std::sync::Mutex;
 
@@ -292,7 +294,7 @@ models = ["alpha"]
                 StateView::empty()
             }
             fn query(&self, _key: &RoutingKey, query: &StateQuery) -> Result<StateSnapshot, StateQueryError> {
-                self.0.lock().unwrap().push(query.decision_id.clone());
+                self.0.lock().unwrap().push(query.route_id.clone());
                 Ok(StateSnapshot::empty())
             }
             fn report(&self, _feedback: Feedback) {}
@@ -307,16 +309,16 @@ models = ["alpha"]
         let req = RouteRequest::default();
 
         let hint = RouteHint {
-            state_query: Some(StateQuery::text("hello").with_decision_id("host-filled")),
+            state_query: Some(StateQuery::text("hello").with_route_id("host-filled")),
             ..RouteHint::default()
         };
         let decision = router.route(&req, &hint).expect("route");
-        assert_eq!(recorder.0.lock().unwrap().as_slice(), &[decision.decision_id.clone()]);
-        assert_ne!(decision.decision_id.as_deref(), Some("host-filled"));
+        assert_eq!(recorder.0.lock().unwrap().as_slice(), &[decision.route_id.clone()]);
+        assert_ne!(decision.route_id.as_deref(), Some("host-filled"));
 
         let plain = router.route(&req, &RouteHint::default()).expect("route");
-        assert!(plain.decision_id.is_some());
-        assert_ne!(plain.decision_id, decision.decision_id);
+        assert!(plain.route_id.is_some());
+        assert_ne!(plain.route_id, decision.route_id);
         assert_eq!(recorder.0.lock().unwrap().len(), 1, "no state_query → query not called");
     }
 }
