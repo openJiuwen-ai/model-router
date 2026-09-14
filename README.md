@@ -38,14 +38,18 @@ model-router/
 │   ├── runtime/                    # L4 装配与运行：Router 门面
 │   └── py/                         # L5 PyO3 绑定（cdylib `_openjiuwen`）
 ├── python/
-│   ├── openjiuwen/                 # 云侧 Python 门面、算法契约、随包算法 demo
-│   ├── test_algo/                  # 包外自定义算法示例（import 时按 name 登记）
-│   └── custom_test_algo/           # 安装 wheel 后自定义算法并自行注册
+│   ├── openjiuwen/                 # 云侧 Python 门面、算法契约、随包算法
+│   │   ├── x_router/                # 按请求复杂度分档选模型的算法
+│   │   ├── test_algo/              # 随包算法示例（discover 自动登记）
+│   │   └── test_algo2/             # 同上，另一个示例
+│   └── custom_test_algo/           # 包外自定义算法示例（import 时按 name 登记）
 ├── config/
 │   ├── edge.toml                   # 端侧：memory 进程内
-│   └── cloud.toml                  # 云侧：remote state
+│   ├── cloud.toml                  # 云侧：remote state
+│   └── x-router-example.toml        # x-router：档位映射 + 分类器
 ├── examples/
 │   ├── python_integration.py       # Python 宿主集成示例（maturin develop 后可运行）
+│   ├── x_router_cli.py              # x-router 命令行驱动（看一份 profile 会怎么路由）
 │   └── rust_integration/           # Rust 宿主集成示例（独立 mini crate，cargo run）
 ├── docs/
 │   ├── zh/architecture.md          # 架构与插件接入指南（中文）

@@ -345,6 +345,54 @@ def test_state_query_reaches_python_and_returns_retrieved():
     assert item.data == {"model": "strong-cloud"}
 
 
+def test_state_query_carries_the_decision_id_the_selection_returns():
+    """runtime 在调 `query` 前生成 decision_id 并注入，state 与宿主看到的是同一个值。"""
+    pytest.importorskip("openjiuwen._openjiuwen")
+    from openjiuwen import Feedback, RouteHint, Router, StateProvider, StateQuery
+
+    class IdRecorder(StateProvider):
+        name = "python_id_recorder"
+
+        def __init__(self):
+            self.query_ids = []
+            self.report_ids = []
+
+        def snapshot(self, key):
+            return {}
+
+        def query(self, key, query):
+            self.query_ids.append(query.decision_id)
+            return {"view": {}, "retrieved": []}
+
+        def report(self, feedback):
+            self.report_ids.append(feedback.decision_id)
+
+    store = IdRecorder()
+    router = Router.from_config({
+        "algorithm": "passthrough", "state": {"backend": "memory"},
+        "targets": {"models": ["model"]},
+    }, state=store)
+
+    # 宿主构造的查询里 decision_id 始终为空，且不可赋值。
+    query = StateQuery(text="hello")
+    assert query.decision_id is None
+    with pytest.raises(AttributeError):
+        query.decision_id = "host-filled"
+
+    selection = router.route_sync({"session_id": "s", "agent_id": "a"}, RouteHint(state_query=query))
+    assert selection.decision_id
+    assert store.query_ids == [selection.decision_id]
+
+    # 同一个 id 随 Feedback 回到 state，形成 query → report 的关联。
+    router.report_sync(Feedback.ok(selection, 5, session_id="s", agent_id="a"))
+    assert store.report_ids == [selection.decision_id]
+
+    # 没有检索意图：不调 query，id 照常生成且不同。
+    plain = router.route_sync({"session_id": "s", "agent_id": "a"})
+    assert plain.decision_id and plain.decision_id != selection.decision_id
+    assert store.query_ids == [selection.decision_id]
+
+
 def test_query_failure_falls_back_to_snapshot():
     pytest.importorskip("openjiuwen._openjiuwen")
     from openjiuwen import RouteHint, Router, StateQuery

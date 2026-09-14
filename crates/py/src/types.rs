@@ -151,13 +151,22 @@ impl PyRouteHint {
 }
 
 /// 状态检索入参。`snapshot` 的平级可选扩展。
-#[pyclass(name = "StateQuery", get_all, set_all)]
+///
+/// `decision_id` 只读：由 runtime 在调用 state 的 `query` 前填入，宿主构造的
+/// 查询里始终是 `None`。
+#[pyclass(name = "StateQuery")]
 #[derive(Clone, Debug, Default)]
 pub struct PyStateQuery {
+    #[pyo3(get, set)]
     pub text: Option<String>,
+    #[pyo3(get, set)]
     pub vector: Option<Vec<f32>>,
+    #[pyo3(get, set)]
     pub top_k: Option<u32>,
+    #[pyo3(get, set)]
     pub extensions: Vec<PyExtension>,
+    #[pyo3(get)]
+    pub decision_id: Option<String>,
 }
 
 #[pymethods]
@@ -175,6 +184,7 @@ impl PyStateQuery {
             vector,
             top_k,
             extensions: extensions.unwrap_or_default(),
+            decision_id: None,
         };
         query
             .native()
@@ -192,6 +202,7 @@ impl PyStateQuery {
             vector: None,
             top_k,
             extensions: Vec::new(),
+            decision_id: None,
         }
     }
 }
@@ -203,6 +214,7 @@ impl PyStateQuery {
             vector: self.vector.clone(),
             top_k: self.top_k,
             extensions: self.extensions.iter().map(|e| e.inner.clone()).collect(),
+            decision_id: self.decision_id.clone(),
         }
     }
 
@@ -218,6 +230,7 @@ impl PyStateQuery {
                     inner: inner.clone(),
                 })
                 .collect(),
+            decision_id: query.decision_id.clone(),
         }
     }
 }

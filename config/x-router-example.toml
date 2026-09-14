@@ -1,0 +1,77 @@
+# x-router profile. The Rust profile parser reads everything above [x-router];
+# the [x-router] table is read by openjiuwen.x_router.build_router().
+algorithm = "x-router"
+
+[state]
+backend = "memory"
+ttl_secs = 300
+max_entries = 1024
+
+[targets]
+models = ["local", "vendor-a/fast", "vendor-b/deep", "vendor-c/reasoning"]
+
+[x-router]
+local_capability_level = "MEDIUM"   # SIMPLE..REASONING, or "NONE" to disable the local tier
+local_model = "local"
+classifier_preview_chars = 6000
+
+[x-router.tier_models]
+COMPLEX = "vendor-a/fast"
+RESEARCH = "vendor-b/deep"
+REASONING = "vendor-c/reasoning"
+
+# The classifier runs in this process. Point it at weights; there is no server
+# to start. Omit this table, or set enabled = false, to run heuristic-only.
+[x-router.classifier_model]
+enabled = true
+model_path = "/path/to/Qwen/Qwen3-0.6B"
+
+# "auto" picks cuda:0 when CUDA is available, else cpu. Pin an index on a shared
+# box so the classifier does not land on a card that is already busy.
+device = "auto"              # "cpu", "cuda", "cuda:3", …
+# "auto" is bfloat16 on CUDA and float32 on CPU. A 0.6B is ~1.2 GB in bf16.
+dtype = "auto"               # "bfloat16", "float16", "float32"
+max_input_tokens = 4096      # Prompt budget
+max_tokens = 16              # Output budget
+
+# ---------------------------------------------------------------------------
+# Bandit (optional, off by default). Lets the outcomes of similar past
+# conversations override the classifier's tier when the evidence is strong.
+# Requires the host to report scored outcomes; see python/openjiuwen/x_router/README.md.
+#
+# To enable: uncomment this block AND set `[state] backend = "x-router-bandit"`
+# above. build_router() refuses one without the other.
+#
+# [x-router.bandit]
+# enabled = true             # false = collect outcomes into the store, never override
+# min_neighbors = 5
+# margin = 0.3               # a challenger tier must beat the classifier's by more than this
+# lambda_c = 0.2             # weight of cost in U = quality - lambda_c * cost / cost_ref_usd
+# cost_ref_usd = 0.005
+#
+# [x-router.bandit.store]    # the state side: what is kept and how it is retrieved
+# retriever_dim = 4096
+# max_entries = 2000           # closed records kept (FIFO); memory ≈ max_entries × retriever_dim × 4 B
+# top_k = 10
+# min_similarity = 0.5
+# forgetting_gamma = 1.0     # <1 discounts records from older policy versions
+# pending_ttl_secs = 7200    # a decision never scored is dropped after this
+# exclusion_ttl_secs = 300   # the [state] ttl_secs equivalent for exclusions
+
+# The judge that scores served turns for the bandit. The host runs it after
+# each model call (x_router.build_judge → judge.score); this table only says
+# which model. Two kinds:
+#
+# [x-router.judge_model]
+# kind = "local"                     # weights in this process
+# model_path = "/path/to/Qwen/Qwen3-1.7B"
+# device = "auto"
+# max_tokens = 64
+#
+# [x-router.judge_model]
+# kind = "api"                       # OpenAI-compatible endpoint
+# base_url = "https://openrouter.ai/api/v1"
+# model = "z-ai/glm-4.7"
+# api_key_env = "OPENROUTER_API_KEY" # name of the environment variable, not the key
+# timeout_secs = 30
+# max_tokens = 64

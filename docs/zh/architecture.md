@@ -114,7 +114,7 @@ flowchart TB
 Runtime 是唯一的控制流拥有者：
 
 1. 从请求元数据生成 `RoutingKey`。
-2. 读取当前 state 槽：`RouteHint.state_query` 为空时调用 `snapshot`，否则调用可选的 `query`；`query` 失败或返回越界时降级为 `snapshot`。
+2. 生成本次决策的 `decision_id`；读取当前 state 槽：`RouteHint.state_query` 为空时调用 `snapshot`，否则把 `decision_id` 注入 `StateQuery` 后调用可选的 `query`；`query` 失败或返回越界时降级为 `snapshot`。
 3. 合并请求排除项和状态排除项。
 4. 组装只针对本次请求的 `RouteContext`。
 5. 调用当前 algorithm 槽的 `decide`。
@@ -138,9 +138,9 @@ sequenceDiagram
     participant M as Model Backend
 
     H->>R: route(RouteRequest, RouteHint)
-    R->>R: RequestMetadata → RoutingKey
+    R->>R: RequestMetadata → RoutingKey，生成 decision_id
     alt hint.state_query 非空
-        R->>S: query(RoutingKey, StateQuery)
+        R->>S: query(RoutingKey, StateQuery{…, decision_id})
         S-->>R: StateSnapshot(view, retrieved)
     else 无检索意图或 query 失败
         R->>S: snapshot(RoutingKey)
@@ -172,7 +172,7 @@ sequenceDiagram
 | `RouteRequest` | Host → Runtime → Algorithm | `messages`, `metadata`, `exclusions` | `exclusions` 由宿主重试逻辑维护 |
 | `RouteHint` | Host → Runtime | `cache_affinity?`, `state_query?` | 宿主的每请求提示：KV cache 亲和与状态检索意图 |
 | `StateView` | State → Runtime → Algorithm | `affinity?`, `exclusions`, `stats` | 空视图是合法结果，算法必须可降级 |
-| `StateQuery` | Host → Runtime → State | `text?`, `vector?`, `top_k?`, `extensions` | 检索入参；全部可选，`None` 表示不约束该维度 |
+| `StateQuery` | Host → Runtime → State | `text?`, `vector?`, `top_k?`, `extensions`, `decision_id?` | 检索入参；全部可选，`None` 表示不约束该维度。`decision_id` 由 runtime 注入，宿主填的值被覆盖 |
 | `RetrievedItem` | State → Runtime → Algorithm | `id`, `score`, `data?` | 单条检索命中；`score` 必须有限 |
 | `StateSnapshot` | State → Runtime | `view`, `retrieved` | `query` 的返回；`retrieved` 为空即等价旧行为 |
 | `FeedbackStats` | State → Algorithm | `sample_count` | 是 hint，不是强一致统计 |
@@ -210,9 +210,9 @@ sequenceDiagram
 
 #### 3.2.2 decision_id 的生成位置
 
-`decision_id` 由 **runtime 在 `decide_loop::run` 返回之后**生成并写入 `Decision`，算法本身不生成、也不接收它。`decide_loop::run` 只负责组装 `RouteContext`、调用纯函数 `AlgorithmProvider::decide`、返回 `Decision`；回到 `Router::route` 后，runtime 用 `进程 id + 纳秒时间戳 + 进程内自增序列` 填充 `Decision.decision_id`。
+`decision_id` 由 **runtime 在 `Router::route` 进入 `decide_loop::run` 之前**生成（`进程 id + 纳秒时间戳 + 进程内自增序列`），算法本身不生成、也不接收它。它在 `run` 内只去一个地方：注入 `StateQuery.decision_id` 交给 state 的 `query`（宿主自填的值被覆盖；无检索意图时不调 `query`，id 照常生成）。`run` 返回后 runtime 再把同一个值写进 `Decision.decision_id`。`RouteContext` 不携带它。
 
-这样做的目的是保住算法模块的**纯函数属性**：相同输入永远得到相同输出，便于重放与表驱动测试。若把 id 生成下放进算法，算法就被赋予了“调用次数”这类隐藏输入，纯度被破坏。runtime 也**只承诺**进程内不重号，不承诺分布式唯一，也不做去重 —— 它只是一个用于关联 `Feedback` 与 `Decision` 的观测线索。
+这样做的目的是保住算法模块的**纯函数属性**：相同输入永远得到相同输出，便于重放与表驱动测试。若把 id 生成下放进算法，算法就被赋予了“调用次数”这类隐藏输入，纯度被破坏。state 则相反——它本来就是有状态的一侧，而且是链路上唯一在 `decide` 之前看到检索文本的角色，拿到 id 后可以为本次决策开一条待回填的记录，等 `report` 带同一 id 回来时关闭（按内容检索的 kNN 记忆正是这么用它的）。runtime **只承诺**进程内不重号，不承诺分布式唯一，也不做去重 —— 它只是一个用于关联 `StateQuery`、`Decision` 与 `Feedback` 的观测线索。
 
 宿主要在 `report` 时带回该 id，只需保留 `route` 返回的 `ModelSelection`，把它的 `decision_id` 填进 `Feedback`（`Feedback::ok(decision, ...)` 会自动提取）。缺失时按“未知”处理，不构成错误。
 
@@ -679,7 +679,15 @@ Rust 内置算法在 runtime registry 按名登记，全部由 feature 门控，
 
 新增内置算法需要三处联动：在 `crates/algorithms` 中实现并按 feature 门控，在 `crates/runtime/src/registry.rs` 登记名字，并在 `crates/algorithms/Cargo.toml` 与 `crates/runtime/Cargo.toml` 同步声明 feature。
 
-Python 侧另有两个随包示例算法，`import openjiuwen` 时由 `discover` 扫描并列子包自动安装：`python_cost_aware`（`test_algo/cost_aware.py`，按类属性成本表选最低成本目标）和 `python_last_available`（`test_algo2/last_available.py`，选过滤后目录的末项目标）。两者可直接按名装配，也可作为自定义 Python 算法的写法参考。
+Python 侧的随包算法由 `discover` 在 `import openjiuwen` 时扫描并列子包自动安装，可直接按名装配：
+
+| 名称 | 位置 | 说明 |
+|---|---|---|
+|  `x-router` | `x_router/` | 用小分类器把请求分成五档复杂度，按档位选模型；见 [`x-router/README.md`](../../python/openjiuwen/x_router/README.md) |
+| `python_cost_aware` | `test_algo/cost_aware.py` | 示例：按类属性成本表选最低成本目标 |
+| `python_last_available` | `test_algo2/last_available.py` | 示例：选过滤后目录的末项目标 |
+
+后两个是写法参考，仅用于演示 `AlgorithmProvider` 的最小形态。 `x-router` 是成建制实现，需要 `openjiuwen[x-router]` 这个 extra 才能用模型分类；不装则回落到内置的启发式分类。
 
 ### 7.2 Rust Algorithm
 

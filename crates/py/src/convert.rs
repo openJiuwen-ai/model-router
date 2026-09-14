@@ -527,11 +527,13 @@ pub fn extract_state_query(obj: &Bound<'_, PyAny>) -> PyResult<StateQuery> {
             Some(v) if !v.is_none() => extract_extensions(&v)?,
             _ => Vec::new(),
         };
+        // dict 形式不接受 `decision_id`：那是 runtime 的关联字段，宿主填了也会被覆盖。
         let query = StateQuery {
             text,
             vector,
             top_k,
             extensions,
+            decision_id: None,
         };
         query
             .validate()

@@ -97,6 +97,9 @@ impl Router {
     /// 返回的是 Result<Decision, RouterError> 类型。
     pub fn route(&self, req: &RouteRequest, hint: &RouteHint) -> Result<Decision, RouterError> {
         let seed = self.seed.fetch_add(1, Ordering::Relaxed);
+        // 先于读 state 生成：state 的 `query` 需要它来关联之后带同一 id 回来的
+        // 反馈。算法仍然拿不到它——它不进 RouteContext，只在 run 返回后写入 Decision。
+        let decision_id = Self::next_decision_id();
         let mut decision = decide_loop::run(
             // 运行决策循环。
             self.algorithm.as_ref(),
@@ -105,16 +108,21 @@ impl Router {
             hint,
             &self.targets,
             seed,
+            &decision_id,
         )?;
-        // 进程内序列保证同进程不同 Router 不重号；不承诺分布式唯一或去重。
+        decision.decision_id = Some(decision_id);
+        Ok(decision)
+    }
+
+    /// 进程内序列保证同进程不同 Router 不重号；不承诺分布式唯一或去重。
+    fn next_decision_id() -> String {
         static NEXT_ID: AtomicU64 = AtomicU64::new(0);
         let sequence = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         let time = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        decision.decision_id = Some(format!("{}-{time}-{sequence}", std::process::id()));
-        Ok(decision)
+        format!("{}-{time}-{sequence}", std::process::id())
     }
 
     /// 校验后转发状态层。
@@ -269,5 +277,46 @@ models = ["alpha"]
             Ok(())
         );
         assert_eq!(router.state.snapshot(&key).stats.sample_count, 1);
+    }
+
+    /// state 的 `query` 收到的 `decision_id` 必须与 `route` 返回的一致，且覆盖宿主自填的值；
+    /// 没有检索意图时不调 `query`，id 照常生成。
+    #[test]
+    fn query_receives_the_decision_id_the_decision_carries() {
+        use openjiuwen_protocol::{RoutingKey, StateQuery, StateQueryError, StateSnapshot, StateView};
+        use std::sync::Mutex;
+
+        struct Recorder(Mutex<Vec<Option<String>>>);
+        impl StateProvider for Recorder {
+            fn snapshot(&self, _key: &RoutingKey) -> StateView {
+                StateView::empty()
+            }
+            fn query(&self, _key: &RoutingKey, query: &StateQuery) -> Result<StateSnapshot, StateQueryError> {
+                self.0.lock().unwrap().push(query.decision_id.clone());
+                Ok(StateSnapshot::empty())
+            }
+            fn report(&self, _feedback: Feedback) {}
+        }
+
+        let recorder = Arc::new(Recorder(Mutex::new(Vec::new())));
+        let router = Router::from_parts(
+            registry::create_algorithm("passthrough").expect("passthrough"),
+            recorder.clone(),
+            TargetSet::new(["alpha"]),
+        );
+        let req = RouteRequest::default();
+
+        let hint = RouteHint {
+            state_query: Some(StateQuery::text("hello").with_decision_id("host-filled")),
+            ..RouteHint::default()
+        };
+        let decision = router.route(&req, &hint).expect("route");
+        assert_eq!(recorder.0.lock().unwrap().as_slice(), &[decision.decision_id.clone()]);
+        assert_ne!(decision.decision_id.as_deref(), Some("host-filled"));
+
+        let plain = router.route(&req, &RouteHint::default()).expect("route");
+        assert!(plain.decision_id.is_some());
+        assert_ne!(plain.decision_id, decision.decision_id);
+        assert_eq!(recorder.0.lock().unwrap().len(), 1, "no state_query → query not called");
     }
 }
