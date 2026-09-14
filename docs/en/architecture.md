@@ -265,7 +265,8 @@ pub trait AlgorithmProvider: Send + Sync {
 
 Design discipline:
 
-- `decide` performs no I/O, calls no models, and does not access state.
+- `decide` does not call the **selected target model** (calling it is the host's job) and does not access state.
+- A decision-aiding model of the algorithm's own (e.g. a complexity classifier) is allowed; its calls should stay stateless and side-effect-free where possible, avoiding caches, session affinity, or other mutable state that would weaken replayability. This is the implementer's own responsibility.
 - It does not read the system clock or global randomness; when randomness is needed, only `ctx.seed` is used.
 - Identical inputs must produce identical outputs, enabling replay and table-driven tests.
 - When `ctx.view` is empty, it must still return a legal decision or an explicit `NoTarget`.
@@ -1005,7 +1006,7 @@ This avoids half-updated states when modifying multiple related slots inside one
 - The Algorithm still works with an empty `StateView`.
 - Implement `StateProvider::query` when finer retrieval is needed, and pass retrieval intent via `RouteHint.state_query`; plugins that only implement `snapshot` need no changes.
 - Retrieval hits returned by `query` are hints: the algorithm must degrade when `retrieved` is empty.
-- Algorithm/Evolving perform no I/O and keep no cross-call mutable state.
+- Algorithm/Evolving keep no cross-call mutable state; an algorithm may call its own decision-aiding model, but must not call the selected target model.
 - State's remote failure path returns an empty view; it must not wait indefinitely.
 - Custom plugins use unique, stable `name`s.
 - Put private signals in `Feedback.extensions` with their own version; do not change the protocol core for business fields.

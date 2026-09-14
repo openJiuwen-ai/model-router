@@ -1,6 +1,16 @@
 //! [`AlgorithmProvider`]：算法实现者的唯一接入点。
 //!
-//! 纯函数，不做 I/O、不持有可变状态。同样的 `(request, ctx)` 必须返回同样的 [`Decision`]。
+//! 纯函数，不持有可变状态。同样的 `(request, ctx)` 必须返回同样的 [`Decision`]。
+//!
+//! 三条边界：
+//!
+//! 1. **不得调用被选中的目标模型。** 决策止于返回 [`Decision`] 里的
+//!    `selected_model_id`；调用目标模型由宿主（runtime / host）负责。
+//! 2. **可以自带决策辅助模型**（如复杂度分类器），它服务的是决策本身，
+//!    与第 1 条不冲突。
+//! 3. **调用应尽量保持无状态纯调用**：无论自带模型还是外部（含云端）
+//!    辅助模型，都应避免在调用链中引入可变状态（缓存、会话粘性等），
+//!    以免削弱可重放性。这是**实现者自身的责任**，框架不强制约束。
 
 use openjiuwen_protocol::{
     Decision, RetrievedItem, RouteRequest, RouterError, StateView, TargetSet,

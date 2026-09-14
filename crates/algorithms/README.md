@@ -2,7 +2,7 @@
 
 ## 简介
 
-`openjiuwen-algorithms` 是 openjiuwen-router 的 **L3 算法层**：纯函数集合，只读 `RouteRequest` 与 `RouteContext`，返回 `Decision`。本 crate **不做 I/O、不持有可变状态**；跨请求信息由 runtime 从 state 快照后经 `ctx.view` 注入。
+`openjiuwen-algorithms` 是 openjiuwen-router 的 **L3 算法层**：纯函数集合，只读 `RouteRequest` 与 `RouteContext`，返回 `Decision`。本 crate **不持有可变状态**；跨请求信息由 runtime 从 state 快照后经 `ctx.view` 注入。
 
 算法团队的唯一接入点是 `AlgorithmProvider` trait（`name` / `decide`），与 state 侧 `StateProvider` 对位。在线自演进是另一条契约 `EvolvingProvider`（`name` / `fit`），同样纯计算；拉数据、调度、CAS 写回由 runtime 的 `TrainingJob` 履行。
 
@@ -15,6 +15,21 @@
 - **决策与执行分离**：算法不能 `await` 模型；宿主拿到 `Decision` 后自己调后端。
 - **状态外置**：`ctx.view` 可为空，算法必须能降级为冷路由；不知道 state 在内存还是远端。
 - **可重放**：随机性只能用 `ctx.seed`，不能读系统时钟或全局 RNG。
+
+### 边界：哪些模型调用是允许的
+
+「算法不调模型」需要精确化，否则会误伤合理实现（例如自带复杂度分类器的算法）：
+
+1. **不得调用被选中的目标模型。** 决策止于返回 `Decision.selected_model_id`；
+   调用目标模型是宿主（runtime / host）的职责。这是「决策与执行分离」的核心，不可让步。
+2. **算法可以自带决策辅助模型。** 例如用一个小分类器判断请求复杂度、据此选档。
+   它服务的是决策本身：读自己的参数、产出决策信号，与第 1 条不冲突。
+3. **辅助模型调用应尽量保持无状态纯调用。** 无论调用自带模型还是外部（含云端）
+   辅助模型，都应避免在调用链中引入可变状态——如缓存、会话粘性、跨请求记忆。
+   这类状态会削弱「同输入 → 同输出」与可重放性，存在破坏整体架构设计的风险。
+
+第 3 条是**算法实现者自身承担的责任**，不是框架能强制约束的：框架无法阻止
+开发者在自己的模块里保存状态，因此它是纪律要求，而非运行时校验。
 
 ## 仓库结构
 

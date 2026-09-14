@@ -20,3 +20,8 @@ dist/
 *.swp
 .DS_Store
 *.html
+
+# Local working notes (not tracked)
+.workbuddy/
+docs/zh/pr3-review.md
+docs/zh/pr3-comment.md

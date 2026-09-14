@@ -75,7 +75,7 @@ maturin develop
 
 | Python | 契约 |
 |--------|------|
-| `AlgorithmProvider` | `name` + `decide(request, ctx) -> dict \| ModelSelection`。纯函数：不 I/O、不调模型，随机性只用 `ctx.seed` |
+| `AlgorithmProvider` | `name` + `decide(request, ctx) -> dict \| ModelSelection`。纯函数：不调用被选中的目标模型，不持有可变状态；可自带决策辅助模型（如复杂度分类器），但调用应尽量无状态；随机性只用 `ctx.seed` |
 | `StateProvider` | `name` + `snapshot(key) -> dict \| StateView`、`report(feedback)`。状态是 hint；超时应返回空视图 |
 | `StateProvider.query(key, query)` | **可选**。实现后可做文本 / 向量 KNN 等精细检索，返回 `dict`（`view` + `retrieved`）或 `StateSnapshot`。未实现时 Router 自动降级为 `snapshot` |
 | `RouteContext` | 传给 `decide`：`targets` / `view` / `retrieved` / `seed` |
