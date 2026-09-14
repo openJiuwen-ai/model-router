@@ -165,7 +165,7 @@ impl Extension {
 ///
 /// * `version`：协议版本。
 /// * `event_id`：宿主关联事件 id；缺失表示未知（旧数据 / 未关联）。
-/// * `decision_id`：runtime 生成的唯一决策 id；缺失表示未知。
+/// * `route_id`：一次 `route` 的关联 id，由 runtime 生成；缺失表示未知。
 /// * `key`：路由键。
 /// * `selected_model_id`：选中目标模型 id。
 /// * `observed_at_ms`：观测时刻；缺失表示未知。
@@ -175,7 +175,7 @@ impl Extension {
 pub struct Feedback {
     pub version: u32,
     pub event_id: Option<String>,
-    pub decision_id: Option<String>,
+    pub route_id: Option<String>,
     pub key: RoutingKey,
     pub selected_model_id: String,
     pub observed_at_ms: Option<u64>,
@@ -186,12 +186,12 @@ pub struct Feedback {
 impl Feedback {
     /// 创建一个成功反馈（兼容旧 `Feedback::ok`）。
     ///
-    /// 旧数据允许缺失关联：`event_id` / `decision_id` / `observed_at_ms` 设为 `None` 表示未知。
+    /// 旧数据允许缺失关联：`event_id` / `route_id` / `observed_at_ms` 设为 `None` 表示未知。
     pub fn ok(key: RoutingKey, selected_model_id: impl Into<String>, latency_ms: u64) -> Self {
         Self {
             version: FEEDBACK_VERSION,
             event_id: None,
-            decision_id: None,
+            route_id: None,
             key,
             selected_model_id: selected_model_id.into(),
             observed_at_ms: None,
@@ -209,7 +209,7 @@ impl Feedback {
         Self {
             version: FEEDBACK_VERSION,
             event_id: None,
-            decision_id: None,
+            route_id: None,
             key,
             selected_model_id: selected_model_id.into(),
             observed_at_ms: None,
@@ -284,7 +284,7 @@ mod tests {
         let fb = Feedback::ok(key(), "m", 12);
         assert_eq!(fb.version, FEEDBACK_VERSION);
         assert!(fb.event_id.is_none());
-        assert!(fb.decision_id.is_none());
+        assert!(fb.route_id.is_none());
         let c = fb.call.expect("ok has call");
         assert_eq!(c.outcome, Outcome::Ok);
         assert_eq!(c.latency_ms, Some(12));

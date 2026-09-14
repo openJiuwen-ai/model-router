@@ -47,9 +47,9 @@ def params(bandit={"min_neighbors": 2}):
 
 
 class Selection:
-    def __init__(self, decision_id="d1", tier="COMPLEX", model="cloud-a"):
+    def __init__(self, route_id="d1", tier="COMPLEX", model="cloud-a"):
         self.selected_model_id = model
-        self.decision_id = decision_id
+        self.route_id = route_id
         self.reasoning = "x-router: rule=escalate_cloud tier={0} source=llm".format(tier)
 
 
@@ -62,7 +62,7 @@ class RecordingRouter:
     def route_sync(self, request, hint=None):
         with self.lock:
             self.routes.append((request, hint))
-        return Selection(decision_id="d{0}".format(len(self.routes)))
+        return Selection(route_id="d{0}".format(len(self.routes)))
 
     def report_sync(self, feedback):
         with self.lock:
@@ -139,12 +139,12 @@ def test_hint_uses_the_classifier_preview_and_stays_under_the_kernel_byte_cap():
 def test_quality_report_has_the_shape_the_store_reads_and_rejects_bad_input():
     fb = build_bandit_feedback(Selection(), {SERVED: (0.8, 0.004), "medium": 0.1}, session_id="s", agent_id="a")
     assert fb == {
-        "session_id": "s", "agent_id": "a", "selected_model_id": "cloud-a", "decision_id": "d1", "call": None,
+        "session_id": "s", "agent_id": "a", "selected_model_id": "cloud-a", "route_id": "d1", "call": None,
         "extensions": [{"schema": EXTENSION_SCHEMA, "version": "1", "data": {"observations": {
             "COMPLEX": {"quality": 0.8, "cost_usd": 0.004}, "MEDIUM": {"quality": 0.1, "cost_usd": None}}}}],
     }
     assert parse_reasoning(Selection().reasoning)["tier"] == "COMPLEX"
-    for selection, observations in [(Selection(decision_id=None), {SERVED: 0.5}), (Selection(), {}),
+    for selection, observations in [(Selection(route_id=None), {SERVED: 0.5}), (Selection(), {}),
                                     (Selection(), {SERVED: 1.5}), (Selection(), {SERVED: (0.5, -1)}),
                                     (Selection(), {"BOGUS": 0.5}), (Selection(), {SERVED: 0.5, "COMPLEX": 0.6})]:
         with pytest.raises(ValueError):
@@ -173,8 +173,8 @@ def test_report_files_call_feedback_now_and_scores_after():
     assert svc.report(selection, latency_ms=42, messages=MESSAGES, response_text="done", cost_usd=0.0,
                       session_id="s", agent_id="a") is True
     call_fb, bandit_fb = router.reports
-    assert call_fb["call"] == {"outcome": "ok", "latency_ms": 42} and call_fb["decision_id"] == "d1"
-    assert bandit_fb["decision_id"] == "d1" and bandit_fb["call"] is None
+    assert call_fb["call"] == {"outcome": "ok", "latency_ms": 42} and call_fb["route_id"] == "d1"
+    assert bandit_fb["route_id"] == "d1" and bandit_fb["call"] is None
     assert svc.stats["settled"] == 1 and svc.stats["pending"] == 0
 
     # Nothing to score: a failed call, or no transcript / response, or no judge.

@@ -114,7 +114,7 @@ flowchart TB
 Runtime 是唯一的控制流拥有者：
 
 1. 从请求元数据生成 `RoutingKey`。
-2. 生成本次决策的 `decision_id`；读取当前 state 槽：`RouteHint.state_query` 为空时调用 `snapshot`，否则把 `decision_id` 注入 `StateQuery` 后调用可选的 `query`；`query` 失败或返回越界时降级为 `snapshot`。
+2. 生成本次 `route` 的 `route_id`；读取当前 state 槽：`RouteHint.state_query` 为空时调用 `snapshot`，否则把 `route_id` 注入 `StateQuery` 后调用可选的 `query`；`query` 失败或返回越界时降级为 `snapshot`。
 3. 合并请求排除项和状态排除项。
 4. 组装只针对本次请求的 `RouteContext`。
 5. 调用当前 algorithm 槽的 `decide`。
@@ -138,9 +138,9 @@ sequenceDiagram
     participant M as Model Backend
 
     H->>R: route(RouteRequest, RouteHint)
-    R->>R: RequestMetadata → RoutingKey，生成 decision_id
+    R->>R: RequestMetadata → RoutingKey，生成 route_id
     alt hint.state_query 非空
-        R->>S: query(RoutingKey, StateQuery{…, decision_id})
+        R->>S: query(RoutingKey, StateQuery{…, route_id})
         S-->>R: StateSnapshot(view, retrieved)
     else 无检索意图或 query 失败
         R->>S: snapshot(RoutingKey)
@@ -172,14 +172,14 @@ sequenceDiagram
 | `RouteRequest` | Host → Runtime → Algorithm | `messages`, `metadata`, `exclusions` | `exclusions` 由宿主重试逻辑维护 |
 | `RouteHint` | Host → Runtime | `cache_affinity?`, `state_query?` | 宿主的每请求提示：KV cache 亲和与状态检索意图 |
 | `StateView` | State → Runtime → Algorithm | `affinity?`, `exclusions`, `stats` | 空视图是合法结果，算法必须可降级 |
-| `StateQuery` | Host → Runtime → State | `text?`, `vector?`, `top_k?`, `extensions`, `decision_id?` | 检索入参；全部可选，`None` 表示不约束该维度。`decision_id` 由 runtime 注入，宿主填的值被覆盖 |
+| `StateQuery` | Host → Runtime → State | `text?`, `vector?`, `top_k?`, `extensions`, `route_id?` | 检索入参；全部可选，`None` 表示不约束该维度。`route_id` 由 runtime 注入，宿主填的值被覆盖 |
 | `RetrievedItem` | State → Runtime → Algorithm | `id`, `score`, `data?` | 单条检索命中；`score` 必须有限 |
 | `StateSnapshot` | State → Runtime | `view`, `retrieved` | `query` 的返回；`retrieved` 为空即等价旧行为 |
 | `FeedbackStats` | State → Algorithm | `sample_count` | 是 hint，不是强一致统计 |
 | `RouteContext` | Runtime → Algorithm | `targets`, `view`, `retrieved`, `seed` | runtime 组装；插件不自行构造状态快照 |
 | `Decision` | Algorithm → Runtime | `selected_model_id`, `reasoning`, `is_answer_call` | Rust 内部决策类型 |
 | `ModelSelection` | Runtime/PyO3 → Host | 与 `Decision` 相同 | 跨边界投影，供宿主或下一级插件消费 |
-| `Feedback` | Host → Runtime → State | `version`, `event_id?`, `decision_id?`, `key`, `selected_model_id`, `observed_at_ms?`, `call?`, `extensions` | 具体非泛型结构；`Overflow/Unavailable` 可驱动排除 |
+| `Feedback` | Host → Runtime → State | `version`, `event_id?`, `route_id?`, `key`, `selected_model_id`, `observed_at_ms?`, `call?`, `extensions` | 具体非泛型结构；`Overflow/Unavailable` 可驱动排除 |
 | `CallFeedback` | 内含于 `Feedback.call` | `outcome`, `latency_ms?`, `cache_valid?` | `call = None` 表示延迟 / 未知评价 |
 | `Extension` | 内含于 `Feedback.extensions` | `schema`, `version`, `data` | `schema` / `version` 非空；`data` 为受约束 `Value` |
 | `TrainingBatch` | Runtime → Evolving | `feedbacks`, `prompts` | 由 DataSelector 组装的训练输入；`prompts` 为富样本通道 |
@@ -191,7 +191,7 @@ sequenceDiagram
 `Feedback` 是宿主每次模型调用后回报的调用结果。它既需要承载应用与算法都关心的通用信号，又不能因为个别宿主 / 算法的私有需求而不断改动公共类型，因此采用**具体非泛型结构**，而不是 `Feedback<T>`：
 
 - **不做泛型**。泛型会把类型参数传染到 `StateProvider`、`TrainingBatch`、PyO3 边界乃至 Python 侧，任何新载荷都会迫使整条链路重新实例化；跨语言场景下 Python 也无法表达泛型。协议类型必须是模块间的共同词汇表，保持单一具体类型。
-- **稳定核心**：`version`、`event_id`、`decision_id`、`key`、`selected_model_id`、`observed_at_ms`、`call`。这些字段由 runtime 定义，所有实现方共享同一语义。
+- **稳定核心**：`version`、`event_id`、`route_id`、`key`、`selected_model_id`、`observed_at_ms`、`call`。这些字段由 runtime 定义，所有实现方共享同一语义。
 - **版本化扩展**：`extensions: Vec<Extension>`。宿主或算法自己的字段放进 `Extension { schema, version, data }`，公共核心不随业务扩张而修改。
 - **未知 schema 也透传**。当前最小版本不维护 schema 注册表：未知 `schema` 仅做结构校验后透传，明确**不承诺语义**；这样扩展的演进不需要协议层发版。
 
@@ -208,13 +208,13 @@ sequenceDiagram
 
 `Feedback::validate` 是唯一校验入口：`Router::try_report` 与 Python `PyRouter.report` 都先调用它，校验不过的反馈**不写入 state**。`call = None` 是合法状态，表示调用结果尚不可知（延迟评价），此时 `latency_ms` / `cache_valid` 一并缺省。
 
-#### 3.2.2 decision_id 的生成位置
+#### 3.2.2 route_id 的生成位置
 
-`decision_id` 由 **runtime 在 `Router::route` 进入 `decide_loop::run` 之前**生成（`进程 id + 纳秒时间戳 + 进程内自增序列`），算法本身不生成、也不接收它。它在 `run` 内只去一个地方：注入 `StateQuery.decision_id` 交给 state 的 `query`（宿主自填的值被覆盖；无检索意图时不调 `query`，id 照常生成）。`run` 返回后 runtime 再把同一个值写进 `Decision.decision_id`。`RouteContext` 不携带它。
+`route_id` 由 **runtime 在 `Router::route` 进入 `decide_loop::run` 之前**生成（`进程 id + 纳秒时间戳 + 进程内自增序列`），算法本身不生成、也不接收它。它在 `run` 内只去一个地方：注入 `StateQuery.route_id` 交给 state 的 `query`（宿主自填的值被覆盖；无检索意图时不调 `query`，id 照常生成）。`run` 返回后 runtime 再把同一个值写进 `Decision.route_id`。`RouteContext` 不携带它。
 
-这样做的目的是保住算法模块的**纯函数属性**：相同输入永远得到相同输出，便于重放与表驱动测试。若把 id 生成下放进算法，算法就被赋予了“调用次数”这类隐藏输入，纯度被破坏。state 则相反——它本来就是有状态的一侧，而且是链路上唯一在 `decide` 之前看到检索文本的角色，拿到 id 后可以为本次决策开一条待回填的记录，等 `report` 带同一 id 回来时关闭（按内容检索的 kNN 记忆正是这么用它的）。runtime **只承诺**进程内不重号，不承诺分布式唯一，也不做去重 —— 它只是一个用于关联 `StateQuery`、`Decision` 与 `Feedback` 的观测线索。
+这样做的目的是保住算法模块的**纯函数属性**：相同输入永远得到相同输出，便于重放与表驱动测试。若把 id 生成下放进算法，算法就被赋予了“调用次数”这类隐藏输入，纯度被破坏。state 则相反——它本来就是有状态的一侧，而且是链路上唯一在 `decide` 之前看到检索文本的角色，拿到 id 后可以为本次路由开一条待回填的记录，等 `report` 带同一 id 回来时关闭（按内容检索的 kNN 记忆正是这么用它的）。runtime **只承诺**进程内不重号，不承诺分布式唯一，也不做去重 —— 它只是一个用于关联 `StateQuery`、`Decision` 与 `Feedback` 的观测线索。
 
-宿主要在 `report` 时带回该 id，只需保留 `route` 返回的 `ModelSelection`，把它的 `decision_id` 填进 `Feedback`（`Feedback::ok(decision, ...)` 会自动提取）。缺失时按“未知”处理，不构成错误。
+宿主要在 `report` 时带回该 id，只需保留 `route` 返回的 `ModelSelection`，把它的 `route_id` 填进 `Feedback`（`Feedback::ok(decision, ...)` 会自动提取）。缺失时按“未知”处理，不构成错误。
 
 ### 3.3 数据所有权
 
@@ -397,7 +397,7 @@ flowchart LR
 | `Router::from_toml(text)` | TOML 文本 | `Result<Router, RouterError>` | 测试或配置中心下发文本 |
 | `Router::from_profile(profile)` | `RouterProfile` | `Result<Router, RouterError>` | 高级装配入口 |
 | `Router::from_parts(algorithm, state, targets)` | 算法 trait 对象、state trait 对象、目标集合 | `Router` | 注入自定义 Rust 插件 |
-| `Router::route(req, hint)` | `&RouteRequest`, `&RouteHint` | `Result<Decision, RouterError>` | 执行一次决策；返回前填充 `decision_id` |
+| `Router::route(req, hint)` | `&RouteRequest`, `&RouteHint` | `Result<Decision, RouterError>` | 执行一次决策；返回前填充 `route_id` |
 | `Router::try_report(feedback)` | `Feedback` | `Result<(), FeedbackError>` | 校验后转交 state；非法反馈不写入并返回原因 |
 | `Router::report(feedback)` | `Feedback` | `()` | 兼容入口：内部委托 `try_report`，非法反馈静默丢弃 |
 | `Router::algorithm_name()` | 无 | `&str` | 日志和遥测 |
@@ -431,7 +431,7 @@ pub trait RouterProvider: Send + Sync {
 |---|---|---|---|
 | `Router.from_config(config, state=None)` | 路径或 dict；可注入 Python state | `Router` | 可用 |
 | `Router.from_toml(text)` | TOML 文本 | `Router` | 可用 |
-| `router.route_sync(request, hint=None)` | typed 对象或 dict | `ModelSelection` | 可用；返回值含 `decision_id` |
+| `router.route_sync(request, hint=None)` | typed 对象或 dict | `ModelSelection` | 可用；返回值含 `route_id` |
 | `await router.route(request, hint=None)` | 同上 | `ModelSelection` | API 可用，但当前内部仍同步执行 |
 | `router.report_sync(feedback)` | `Feedback` 或 dict | `None` | 可用；非法反馈抛 Python 异常 |
 | `await router.report(feedback)` | 同上 | `None` | API 可用，但当前内部仍同步执行 |
@@ -534,14 +534,14 @@ fn call_once() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let decision = router.route(&request, &RouteHint::default())?;
-    let decision_id = decision.decision_id.clone();
+    let route_id = decision.route_id.clone();
 
     // 由宿主调用 decision.selected_model_id 对应的模型。
     let latency_ms = 25;
 
     // `Feedback::ok` 构造成功反馈；关联 id 与观测时刻可后置补齐。
     let mut feedback = Feedback::ok(request.routing_key(), decision.selected_model_id, latency_ms);
-    feedback.decision_id = decision_id;
+    feedback.route_id = route_id;
     feedback.observed_at_ms = Some(1_700_000_000_000); // 宿主自己的时钟
 
     // 需要感知校验失败原因用 try_report；不关心则用 report（静默丢弃非法值）。
@@ -579,7 +579,7 @@ selection = router.route_sync(request)
 
 # response = model_clients[selection.selected_model_id].invoke(...)
 
-# `Feedback.ok` 会自动从 selection 提取 decision_id，实现 route 与 report 的关联。
+# `Feedback.ok` 会自动从 selection 提取 route_id，实现 route 与 report 的关联。
 router.report_sync(
     Feedback.ok(
         selection,
@@ -599,7 +599,7 @@ from openjiuwen import CallFeedback, Extension, Feedback, RoutingKey
 feedback = Feedback(
     key=RoutingKey(session_id="session-1", agent_id="my-host"),
     selected_model_id=selection.selected_model_id,
-    decision_id=selection.decision_id,
+    route_id=selection.route_id,
     call=CallFeedback(outcome=Outcome.OK, latency_ms=25),
     extensions=[
         Extension(schema="myapp.usage.v1", version="1.0", data={"tokens": 128, "tier": "gold"}),
@@ -614,7 +614,7 @@ router.report_sync(feedback)               # 校验不过会抛 ValueError
 router.report_sync({
     "key": {"session_id": "session-1", "agent_id": "my-host"},
     "selected_model_id": selection.selected_model_id,
-    "decision_id": selection.decision_id,
+    "route_id": selection.route_id,
     "call": {"outcome": "ok", "latency_ms": 25},
 })
 ```
@@ -998,7 +998,7 @@ let artifact = job.run_once(&MyTrainer);
 | RemoteState RPC | 骨架 | 当前只会退化为空状态 |
 | Python 真正异步桥接 | 未实现 | async 门面内部仍同步 |
 | `Feedback.extensions` 版本化扩展 | 已实现结构校验与透传 | 未知 schema 不承诺语义，无注册表 |
-| feedback 去重 / exactly-once | 未实现 | `decision_id` 仅作关联线索，不保证唯一投递 |
+| feedback 去重 / exactly-once | 未实现 | `route_id` 仅作关联线索，不保证唯一投递 |
 | `RouteHint.cache_affinity` | 已定义但未消费 | 暂不能依赖其决策效果 |
 | `RouteHint.state_query` + `StateProvider::query` | 已实现（Rust + Python 全链路） | 未携带检索意图时走 `snapshot`；失败自动降级，不阻断路由 |
 | KV coordinator 回调 | 只保存、不触发 | 暂不能依赖其切换效果 |

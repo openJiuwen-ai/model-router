@@ -69,7 +69,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         match call_model(&decision.selected_model_id, prompt) {
             Ok(reply) => {
                 let mut feedback = Feedback::ok(request.routing_key(), &decision.selected_model_id, 1);
-                feedback.decision_id = decision.decision_id.clone();
+                feedback.route_id = decision.route_id.clone();
                 router.report(feedback);
                 println!("reply: {reply}");
                 return Ok(());
@@ -80,7 +80,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     decision.selected_model_id
                 );
                 let mut feedback = Feedback::ok(request.routing_key(), &decision.selected_model_id, 1);
-                feedback.decision_id = decision.decision_id.clone();
+                feedback.route_id = decision.route_id.clone();
                 feedback.call.as_mut().unwrap().outcome = Outcome::Unavailable;
                 router.report(feedback);
                 exclusions.push(decision.selected_model_id.clone());

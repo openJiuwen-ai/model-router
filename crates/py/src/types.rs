@@ -152,7 +152,7 @@ impl PyRouteHint {
 
 /// 状态检索入参。`snapshot` 的平级可选扩展。
 ///
-/// `decision_id` 只读：由 runtime 在调用 state 的 `query` 前填入，宿主构造的
+/// `route_id` 只读：由 runtime 在调用 state 的 `query` 前填入，宿主构造的
 /// 查询里始终是 `None`。
 #[pyclass(name = "StateQuery")]
 #[derive(Clone, Debug, Default)]
@@ -166,7 +166,7 @@ pub struct PyStateQuery {
     #[pyo3(get, set)]
     pub extensions: Vec<PyExtension>,
     #[pyo3(get)]
-    pub decision_id: Option<String>,
+    pub route_id: Option<String>,
 }
 
 #[pymethods]
@@ -184,7 +184,7 @@ impl PyStateQuery {
             vector,
             top_k,
             extensions: extensions.unwrap_or_default(),
-            decision_id: None,
+            route_id: None,
         };
         query
             .native()
@@ -202,7 +202,7 @@ impl PyStateQuery {
             vector: None,
             top_k,
             extensions: Vec::new(),
-            decision_id: None,
+            route_id: None,
         }
     }
 }
@@ -214,7 +214,7 @@ impl PyStateQuery {
             vector: self.vector.clone(),
             top_k: self.top_k,
             extensions: self.extensions.iter().map(|e| e.inner.clone()).collect(),
-            decision_id: self.decision_id.clone(),
+            route_id: self.route_id.clone(),
         }
     }
 
@@ -230,7 +230,7 @@ impl PyStateQuery {
                     inner: inner.clone(),
                 })
                 .collect(),
-            decision_id: query.decision_id.clone(),
+            route_id: query.route_id.clone(),
         }
     }
 }
@@ -437,7 +437,7 @@ pub struct PyModelSelection {
     pub selected_model_id: String,
     pub reasoning: String,
     pub is_answer_call: bool,
-    pub decision_id: Option<String>,
+    pub route_id: Option<String>,
 }
 
 #[pymethods]
@@ -449,7 +449,7 @@ impl PyModelSelection {
             selected_model_id,
             reasoning,
             is_answer_call,
-            decision_id: None,
+            route_id: None,
         }
     }
 
@@ -467,7 +467,7 @@ impl PyModelSelection {
             selected_model_id: sel.selected_model_id,
             reasoning: sel.reasoning,
             is_answer_call: sel.is_answer_call,
-            decision_id: sel.decision_id,
+            route_id: sel.route_id,
         }
     }
 
@@ -476,7 +476,7 @@ impl PyModelSelection {
             selected_model_id: self.selected_model_id.clone(),
             reasoning: self.reasoning.clone(),
             is_answer_call: self.is_answer_call,
-            decision_id: self.decision_id.clone(),
+            route_id: self.route_id.clone(),
         }
     }
 }
@@ -629,13 +629,13 @@ impl PyFeedback {
         let mut inner = Feedback::ok(key, model, latency_ms);
         inner.call.as_mut().unwrap().outcome = convert::parse_outcome(outcome)?;
         inner.call.as_mut().unwrap().cache_valid = cache_valid;
-        inner.decision_id = if let Ok(d) = decision.downcast::<pyo3::types::PyDict>() {
-            d.get_item("decision_id")?
+        inner.route_id = if let Ok(d) = decision.downcast::<pyo3::types::PyDict>() {
+            d.get_item("route_id")?
                 .map(|v| v.extract())
                 .transpose()?
                 .flatten()
-        } else if decision.hasattr("decision_id")? {
-            decision.getattr("decision_id")?.extract()?
+        } else if decision.hasattr("route_id")? {
+            decision.getattr("route_id")?.extract()?
         } else {
             None
         };
@@ -670,12 +670,12 @@ impl PyFeedback {
         self.inner.event_id = value;
     }
     #[getter]
-    fn decision_id(&self) -> Option<String> {
-        self.inner.decision_id.clone()
+    fn route_id(&self) -> Option<String> {
+        self.inner.route_id.clone()
     }
     #[setter]
-    fn set_decision_id(&mut self, value: Option<String>) {
-        self.inner.decision_id = value;
+    fn set_route_id(&mut self, value: Option<String>) {
+        self.inner.route_id = value;
     }
     #[getter]
     fn observed_at_ms(&self) -> Option<u64> {

@@ -169,13 +169,13 @@ def build_bandit_feedback(selection, observations, session_id="", agent_id=""):
 
     The result is a feedback dict for ``report_sync`` with ``call = None`` — a
     delayed evaluation in the kernel's terms — carrying the ``x-router.bandit``
-    extension. The store matches it to the query by ``decision_id``, so pass the
+    extension. The store matches it to the query by ``route_id``, so pass the
     selection ``route_sync`` returned, not a copy without one.
     """
     selected = field(selection, "selected_model_id")
-    decision_id = field(selection, "decision_id")
-    if not decision_id:
-        raise ValueError("selection has no decision_id; the store cannot match it to a query")
+    route_id = field(selection, "route_id")
+    if not route_id:
+        raise ValueError("selection has no route_id; the store cannot match it to a query")
     if not observations:
         raise ValueError("observations must name at least one tier")
 
@@ -199,7 +199,7 @@ def build_bandit_feedback(selection, observations, session_id="", agent_id=""):
         "session_id": session_id,
         "agent_id": agent_id,
         "selected_model_id": selected,
-        "decision_id": decision_id,
+        "route_id": route_id,
         "call": None,
         "extensions": [
             {"schema": EXTENSION_SCHEMA, "version": EXTENSION_VERSION, "data": {OBSERVATIONS_KEY: data}}
@@ -336,7 +336,7 @@ class XRouterService(object):
                 "session_id": session_id,
                 "agent_id": agent_id,
                 "selected_model_id": field(selection, "selected_model_id"),
-                "decision_id": field(selection, "decision_id"),
+                "route_id": field(selection, "route_id"),
                 "call": call,
             }
         )

@@ -114,7 +114,7 @@ Solid lines in the diagram represent the current main call chain; dashed lines m
 The Runtime is the sole owner of control flow:
 
 1. Generate a `RoutingKey` from request metadata.
-2. Generate this decision's `decision_id`; read the current state slot: call `snapshot` when `RouteHint.state_query` is empty, otherwise inject the `decision_id` into the `StateQuery` and call the optional `query`; fall back to `snapshot` if `query` fails or returns out-of-bounds data.
+2. Generate this route's `route_id`; read the current state slot: call `snapshot` when `RouteHint.state_query` is empty, otherwise inject the `route_id` into the `StateQuery` and call the optional `query`; fall back to `snapshot` if `query` fails or returns out-of-bounds data.
 3. Merge request exclusions and state exclusions.
 4. Assemble a `RouteContext` scoped to this request only.
 5. Call `decide` on the current algorithm slot.
@@ -140,7 +140,7 @@ sequenceDiagram
     H->>R: route(RouteRequest, RouteHint)
     R->>R: RequestMetadata → RoutingKey
     alt hint.state_query is non-empty
-        R->>S: query(RoutingKey, StateQuery{…, decision_id})
+        R->>S: query(RoutingKey, StateQuery{…, route_id})
         S-->>R: StateSnapshot(view, retrieved)
     else no retrieval intent, or query failed
         R->>S: snapshot(RoutingKey)
@@ -172,14 +172,14 @@ This sequence contains two closed loops:
 | `RouteRequest` | Host → Runtime → Algorithm | `messages`, `metadata`, `exclusions` | `exclusions` is maintained by host retry logic |
 | `RouteHint` | Host → Runtime | `cache_affinity?`, `state_query?` | Per-request host hints: KV cache affinity and state retrieval intent |
 | `StateView` | State → Runtime → Algorithm | `affinity?`, `exclusions`, `stats` | An empty view is a legal result; algorithms must degrade gracefully |
-| `StateQuery` | Host → Runtime → State | `text?`, `vector?`, `top_k?`, `extensions`, `decision_id?` | Retrieval input; all fields optional, `None` means that dimension is unconstrained. `decision_id` is injected by the runtime; a host-supplied value is overwritten |
+| `StateQuery` | Host → Runtime → State | `text?`, `vector?`, `top_k?`, `extensions`, `route_id?` | Retrieval input; all fields optional, `None` means that dimension is unconstrained. `route_id` is injected by the runtime; a host-supplied value is overwritten |
 | `RetrievedItem` | State → Runtime → Algorithm | `id`, `score`, `data?` | A single retrieval hit; `score` must be finite |
 | `StateSnapshot` | State → Runtime | `view`, `retrieved` | Return type of `query`; empty `retrieved` is equivalent to the old behavior |
 | `FeedbackStats` | State → Algorithm | `sample_count` | A hint, not a strongly consistent statistic |
 | `RouteContext` | Runtime → Algorithm | `targets`, `view`, `retrieved`, `seed` | Assembled by runtime; plugins do not construct state snapshots themselves |
 | `Decision` | Algorithm → Runtime | `selected_model_id`, `reasoning`, `is_answer_call` | Rust-internal decision type |
 | `ModelSelection` | Runtime/PyO3 → Host | Same as `Decision` | Cross-boundary projection, consumed by the host or the next-level plugin |
-| `Feedback` | Host → Runtime → State | `version`, `event_id?`, `decision_id?`, `key`, `selected_model_id`, `observed_at_ms?`, `call?`, `extensions` | Concrete non-generic struct; `Overflow/Unavailable` can drive exclusion |
+| `Feedback` | Host → Runtime → State | `version`, `event_id?`, `route_id?`, `key`, `selected_model_id`, `observed_at_ms?`, `call?`, `extensions` | Concrete non-generic struct; `Overflow/Unavailable` can drive exclusion |
 | `CallFeedback` | Nested in `Feedback.call` | `outcome`, `latency_ms?`, `cache_valid?` | `call = None` means delayed / unknown evaluation |
 | `Extension` | Nested in `Feedback.extensions` | `schema`, `version`, `data` | `schema` / `version` non-empty; `data` is a constrained `Value` |
 | `TrainingBatch` | Runtime → Evolving | `feedbacks`, `prompts` | Training input assembled by DataSelector; `prompts` is the rich-sample channel |
@@ -191,7 +191,7 @@ This sequence contains two closed loops:
 `Feedback` is what the host reports back after each model call. It must carry signals common to both applications and algorithms, yet it must not keep changing every time one host or algorithm has a private need. Hence a **concrete non-generic struct** rather than `Feedback<T>`:
 
 - **No generics.** A type parameter would leak into `StateProvider`, `TrainingBatch`, the PyO3 boundary, and the Python side; every new payload would force the whole chain to be re-instantiated, and Python cannot express generics anyway. Protocol types are the shared vocabulary between modules and must stay a single concrete type.
-- **Stable core**: `version`, `event_id`, `decision_id`, `key`, `selected_model_id`, `observed_at_ms`, `call`. The runtime defines these, and every implementer shares the same semantics.
+- **Stable core**: `version`, `event_id`, `route_id`, `key`, `selected_model_id`, `observed_at_ms`, `call`. The runtime defines these, and every implementer shares the same semantics.
 - **Versioned extensions**: `extensions: Vec<Extension>`. Host- or algorithm-specific fields go into `Extension { schema, version, data }`, so the public core does not change as business needs grow.
 - **Unknown schemas pass through.** This minimal version keeps no schema registry: an unknown `schema` is only structurally validated and then passed through, with an explicit **no-semantics guarantee** — so extensions can evolve without a protocol release.
 
@@ -208,13 +208,13 @@ The extension payload `Value` is a zero-dependency, custom JSON subset (`Null` /
 
 `Feedback::validate` is the single validation entry point: both `Router::try_report` and Python's `PyRouter.report` call it first, and a feedback that fails validation is **never written to state**. `call = None` is a legal state meaning the call outcome is not yet known (delayed evaluation), in which case `latency_ms` / `cache_valid` are absent too.
 
-#### 3.2.2 Where `decision_id` is generated
+#### 3.2.2 Where `route_id` is generated
 
-`decision_id` is generated by the **runtime in `Router::route`, before it enters `decide_loop::run`** (`process id + nanosecond timestamp + in-process atomic sequence`). The algorithm neither generates nor receives it. Inside `run` the id goes to exactly one place: it is injected into `StateQuery.decision_id` for the state's `query` (a host-supplied value is overwritten; when there is no retrieval intent `query` is not called and the id is generated all the same). After `run` returns, the runtime writes the same value into `Decision.decision_id`. `RouteContext` does not carry it.
+`route_id` is generated by the **runtime in `Router::route`, before it enters `decide_loop::run`** (`process id + nanosecond timestamp + in-process atomic sequence`). The algorithm neither generates nor receives it. Inside `run` the id goes to exactly one place: it is injected into `StateQuery.route_id` for the state's `query` (a host-supplied value is overwritten; when there is no retrieval intent `query` is not called and the id is generated all the same). After `run` returns, the runtime writes the same value into `Decision.route_id`. `RouteContext` does not carry it.
 
-The purpose is to preserve the algorithm module's **purity**: identical input always yields identical output, which makes replay and table-driven testing possible. If id generation were pushed down into the algorithm, the algorithm would gain a hidden input (its invocation count) and lose that purity. The state is the opposite case — it is the stateful side by definition, and the only party that sees the retrieval text before `decide`; given the id it can open a pending record for this decision and close it when a `report` arrives with the same id (this is exactly how a content-addressed kNN memory uses it). The runtime **only guarantees** in-process uniqueness — not distributed uniqueness, and no deduplication. It is purely an observational handle linking `StateQuery`, `Decision` and `Feedback`.
+The purpose is to preserve the algorithm module's **purity**: identical input always yields identical output, which makes replay and table-driven testing possible. If id generation were pushed down into the algorithm, the algorithm would gain a hidden input (its invocation count) and lose that purity. The state is the opposite case — it is the stateful side by definition, and the only party that sees the retrieval text before `decide`; given the id it can open a pending record for this route and close it when a `report` arrives with the same id (this is exactly how a content-addressed kNN memory uses it). The runtime **only guarantees** in-process uniqueness — not distributed uniqueness, and no deduplication. It is purely an observational handle linking `StateQuery`, `Decision` and `Feedback`.
 
-To return the id on `report`, the host only needs to keep the `ModelSelection` from `route` and put its `decision_id` into the `Feedback` (`Feedback::ok(decision, ...)` extracts it automatically). When absent, it is treated as unknown and is not an error.
+To return the id on `report`, the host only needs to keep the `ModelSelection` from `route` and put its `route_id` into the `Feedback` (`Feedback::ok(decision, ...)` extracts it automatically). When absent, it is treated as unknown and is not an error.
 
 ### 3.3 Data Ownership
 
@@ -396,7 +396,7 @@ This design splits request-level decisions, cross-request memory, and offline/on
 | `Router::from_toml(text)` | TOML text | `Result<Router, RouterError>` | Tests or text pushed from a config center |
 | `Router::from_profile(profile)` | `RouterProfile` | `Result<Router, RouterError>` | Advanced assembly entry |
 | `Router::from_parts(algorithm, state, targets)` | Algorithm trait object, state trait object, target set | `Router` | Inject custom Rust plugins |
-| `Router::route(req, hint)` | `&RouteRequest`, `&RouteHint` | `Result<Decision, RouterError>` | Execute one decision; fills `decision_id` before returning |
+| `Router::route(req, hint)` | `&RouteRequest`, `&RouteHint` | `Result<Decision, RouterError>` | Execute one decision; fills `route_id` before returning |
 | `Router::try_report(feedback)` | `Feedback` | `Result<(), FeedbackError>` | Validate then forward to state; illegal feedback is not written and the reason is returned |
 | `Router::report(feedback)` | `Feedback` | `()` | Compatibility entry: delegates to `try_report`, silently drops illegal feedback |
 | `Router::algorithm_name()` | None | `&str` | Logging and telemetry |
@@ -430,7 +430,7 @@ Note: currently `Router::route` returns `Decision`, while `RouterProvider::route
 |---|---|---|---|
 | `Router.from_config(config, state=None)` | Path or dict; can inject a Python state | `Router` | Available |
 | `Router.from_toml(text)` | TOML text | `Router` | Available |
-| `router.route_sync(request, hint=None)` | Typed object or dict | `ModelSelection` | Available; the return value carries `decision_id` |
+| `router.route_sync(request, hint=None)` | Typed object or dict | `ModelSelection` | Available; the return value carries `route_id` |
 | `await router.route(request, hint=None)` | Same as above | `ModelSelection` | API available, but internally still executes synchronously |
 | `router.report_sync(feedback)` | `Feedback` or dict | `None` | Available; illegal feedback raises a Python exception |
 | `await router.report(feedback)` | Same as above | `None` | API available, but internally still executes synchronously |
@@ -533,14 +533,14 @@ fn call_once() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let decision = router.route(&request, &RouteHint::default())?;
-    let decision_id = decision.decision_id.clone();
+    let route_id = decision.route_id.clone();
 
     // The host invokes the model corresponding to decision.selected_model_id.
     let latency_ms = 25;
 
     // `Feedback::ok` builds a success feedback; correlation id and observation time can be filled in afterwards.
     let mut feedback = Feedback::ok(request.routing_key(), decision.selected_model_id, latency_ms);
-    feedback.decision_id = decision_id;
+    feedback.route_id = route_id;
     feedback.observed_at_ms = Some(1_700_000_000_000); // the host's own clock
 
     // Use try_report when you need the validation failure reason; use report for silent-drop semantics.
@@ -578,7 +578,7 @@ selection = router.route_sync(request)
 
 # response = model_clients[selection.selected_model_id].invoke(...)
 
-# `Feedback.ok` extracts decision_id from the selection automatically, correlating route with report.
+# `Feedback.ok` extracts route_id from the selection automatically, correlating route with report.
 router.report_sync(
     Feedback.ok(
         selection,
@@ -598,7 +598,7 @@ from openjiuwen import CallFeedback, Extension, Feedback, RoutingKey
 feedback = Feedback(
     key=RoutingKey(session_id="session-1", agent_id="my-host"),
     selected_model_id=selection.selected_model_id,
-    decision_id=selection.decision_id,
+    route_id=selection.route_id,
     call=CallFeedback(outcome=Outcome.OK, latency_ms=25),
     extensions=[
         Extension(schema="myapp.usage.v1", version="1.0", data={"tokens": 128, "tier": "gold"}),
@@ -613,7 +613,7 @@ A plain dict works too (field names as above; `call` / `extensions` may themselv
 router.report_sync({
     "key": {"session_id": "session-1", "agent_id": "my-host"},
     "selected_model_id": selection.selected_model_id,
-    "decision_id": selection.decision_id,
+    "route_id": selection.route_id,
     "call": {"outcome": "ok", "latency_ms": 25},
 })
 ```
@@ -997,7 +997,7 @@ This avoids half-updated states when modifying multiple related slots inside one
 | RemoteState RPC | Skeleton | Currently only degrades to empty state |
 | Python real async bridge | Not implemented | Async facade is still synchronous internally |
 | `Feedback.extensions` versioned extension | Structural validation and pass-through implemented | Unknown schemas carry no semantics; no registry |
-| Feedback dedup / exactly-once | Not implemented | `decision_id` is only a correlation handle, not a delivery guarantee |
+| Feedback dedup / exactly-once | Not implemented | `route_id` is only a correlation handle, not a delivery guarantee |
 | `RouteHint.cache_affinity` | Defined but not consumed | Do not rely on its decision effect for now |
 | `RouteHint.state_query` + `StateProvider::query` | Implemented (full Rust + Python chain) | Falls back to `snapshot` when no retrieval intent is carried; failures degrade automatically and never block routing |
 | KV coordinator callback | Stored only, never triggered | Do not rely on its switching effect for now |

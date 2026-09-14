@@ -28,7 +28,7 @@ pub const TRAINING_MAX_MESSAGE_BYTES: usize = 65_536;
 /// * `prompt_id`：宿主侧样本关联 id；缺失表示未关联。
 /// * `key`：路由键，始终存在，用于把样本归并到同一会话 / agent。
 /// * `request`：当时的原始请求（消息与元数据）。
-/// * `decision`：当时的决策（选中目标、理由、`decision_id`）。
+/// * `decision`：当时的决策（选中目标、理由、`route_id`）。
 /// * `feedback`：事后的结果反馈；缺失表示评价尚未回传。
 /// * `text`：宿主渲染好的 prompt 文本；缺失表示由算法自行拼装。
 /// * `extensions`：宿主私有训练载荷，复用 [`Extension`] 版本化预算。

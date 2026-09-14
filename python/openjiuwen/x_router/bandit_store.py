@@ -7,15 +7,15 @@ ones. The algorithm's bandit half (``bandit.py``) reads those as
 
 How a record comes to exist:
 
-    query(key, StateQuery{text, decision_id})
+    query(key, StateQuery{text, route_id})
         vector = encode(text)                        the only moment the text is seen
-        pending[decision_id] = vector                half a record, not retrievable
+        pending[route_id] = vector                half a record, not retrievable
         return the nearest closed records
     ... the host serves the request and scores it, seconds later ...
-    report(Feedback{decision_id, extensions=[x-router.bandit {observations}]})
-        closed.append(pending.pop(decision_id), observations)
+    report(Feedback{route_id, extensions=[x-router.bandit {observations}]})
+        closed.append(pending.pop(route_id), observations)
 
-``decision_id`` is the runtime's: it is injected into the query before the state
+``route_id`` is the runtime's: it is injected into the query before the state
 sees it and comes back on the feedback, so the store never needs an id of its
 own. Pending records that are never closed expire after ``pending_ttl_secs``.
 
@@ -156,7 +156,7 @@ class BanditStore(StateProvider):
         self._lock = threading.Lock()
 
         self._version = 0
-        # decision_id -> (vector, opened_at, policy version the decision was made under)
+        # route_id -> (vector, opened_at, policy version the decision was made under)
         self._pending = OrderedDict()  # type: OrderedDict[str, Tuple[Any, float, int]]
         self._records = []  # type: List[_Record]
         self._matrix = None  # type: Any  # (capacity, dim) float32; rows [0:_count) live
@@ -202,7 +202,7 @@ class BanditStore(StateProvider):
         # type: (Any, Any) -> Dict[str, Any]
         """Nearest closed records, plus the ordinary view.
 
-        Opens a pending record for ``query.decision_id`` when the query carries
+        Opens a pending record for ``query.route_id`` when the query carries
         usable text (or a vector of the right dimension). Any failure degrades
         to a view-only answer: a broken memory must not change routing.
         """
@@ -215,9 +215,9 @@ class BanditStore(StateProvider):
             if vector is None:
                 return {"view": view, "retrieved": []}
             now = self._clock()
-            decision_id = field(query, "decision_id")
-            if isinstance(decision_id, str) and decision_id:
-                self._pending[decision_id] = (vector, now, self._version)
+            route_id = field(query, "route_id")
+            if isinstance(route_id, str) and route_id:
+                self._pending[route_id] = (vector, now, self._version)
                 self._sweep_locked(now)
             try:
                 retrieved = self._neighbours_locked(vector, field(query, "top_k"))
@@ -291,8 +291,8 @@ class BanditStore(StateProvider):
             observations = self._extension_observations(feedback)
             if observations is None:
                 return
-            decision_id = field(feedback, "decision_id")
-            pending = self._pending.pop(decision_id, None) if decision_id else None
+            route_id = field(feedback, "route_id")
+            pending = self._pending.pop(route_id, None) if route_id else None
             if pending is None:
                 self._unknown += 1
                 return

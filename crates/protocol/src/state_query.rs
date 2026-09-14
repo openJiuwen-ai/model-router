@@ -21,12 +21,12 @@ pub const QUERY_MAX_RETRIEVED: usize = 256;
 ///
 /// * `text`：查询文本；embedding 由 state 实现自行完成（那属于 state 的 I/O）。
 /// * `vector`：宿主预计算的查询向量；与 `text` 二选一或同时给出。
-/// * `top_k`：期望返回条数上限。
+/// * `top_k`：top_k 是这次检索希望最多拿回多少条 RetrievedItem
 /// * `extensions`：厂商私有检索参数，复用 [`Extension`] 版本化载荷。
-/// * `decision_id`：本次决策的 id，**由 runtime 在调用 `query` 前填入**；宿主构造时
-///   留空，填了也会被覆盖。与随后 `Decision.decision_id` / `Feedback.decision_id`
+/// * `route_id`：一次 `route` 的关联 id，**由 runtime 在调用 `query` 前填入**；宿主构造时
+///   留空，填了也会被覆盖。与随后 `Decision.route_id` / `Feedback.route_id`
 ///   是同一个值，让 state 能把检索时看到的上下文与之后到达的反馈对上——例如在
-///   `query` 时为该决策开一条待回填的记录，等 `report` 带同一 id 回来时关闭。
+///   `query` 时为该次路由开一条待回填的记录，等 `report` 带同一 id 回来时关闭。
 ///   `is_empty` / `validate` 不看这个字段。
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct StateQuery {
@@ -34,7 +34,7 @@ pub struct StateQuery {
     pub vector: Option<Vec<f32>>,
     pub top_k: Option<u32>,
     pub extensions: Vec<Extension>,
-    pub decision_id: Option<String>,
+    pub route_id: Option<String>,
 }
 
 impl StateQuery {
@@ -60,9 +60,9 @@ impl StateQuery {
         self
     }
 
-    /// 由 runtime 调用：标记本次查询所属的决策。
-    pub fn with_decision_id(mut self, decision_id: impl Into<String>) -> Self {
-        self.decision_id = Some(decision_id.into());
+    /// 由 runtime 调用：标记本次查询所属的 `route`。
+    pub fn with_route_id(mut self, route_id: impl Into<String>) -> Self {
+        self.route_id = Some(route_id.into());
         self
     }
 
@@ -303,6 +303,9 @@ mod tests {
             data: Value::String("x".repeat(40_000)),
         };
         let query = StateQuery {
+            text: None,
+            vector: None,
+            top_k: None,
             extensions: vec![ext; 2],
             ..StateQuery::default()
         };
@@ -312,12 +315,12 @@ mod tests {
         );
     }
 
-    /// `decision_id` 是 runtime 的关联字段，不参与「是否为空」与校验。
+    /// `route_id` 是 runtime 的关联字段，不参与「是否为空」与校验。
     #[test]
-    fn decision_id_is_transparent_to_emptiness_and_validation() {
-        let query = StateQuery::default().with_decision_id("d-1");
+    fn route_id_is_transparent_to_emptiness_and_validation() {
+        let query = StateQuery::default().with_route_id("d-1");
         assert!(query.is_empty());
         assert!(query.validate().is_ok());
-        assert_eq!(query.decision_id.as_deref(), Some("d-1"));
+        assert_eq!(query.route_id.as_deref(), Some("d-1"));
     }
 }

@@ -22,15 +22,18 @@ pub trait StateProvider: Send + Sync {
     /// 路由前一次性快照。基础读取路径，入参只有路由键。
     fn snapshot(&self, key: &RoutingKey) -> StateView;
 
-    /// 带检索参数的快照。`snapshot` 的平级可选扩展。
+    /// 按 [`StateQuery`] 做一次检索读。与 [`StateProvider::snapshot`] 平级，不是它的带参变体。
     ///
-    /// 默认实现**忽略检索参数**并降级为 [`StateProvider::snapshot`]，因此
-    /// 既有的 state 实现无需任何改动即可继续工作；需要向量检索等能力的实现
-    /// 覆盖本方法即可。
+    /// 返回 [`StateSnapshot`]：`view` 仍是按键的 hint；`retrieved` 是命中列表，
+    /// `StateQuery::top_k` 只表示条数上限（实际可更少，空列表合法）。
+    /// `StateQuery::route_id` 由 runtime 注入，实现可用它把本次检索与之后的
+    /// [`StateProvider::report`] 对上。
     ///
-    /// 与 `snapshot` 的纪律一致：实现必须自行降级，**不得**因检索失败而阻断
-    /// 请求——返回仅含视图的结果，或返回 `Err` 交由 runtime 回退。runtime 对
-    /// `Err` 的处理是回退到 `snapshot`，不影响路由可用性。
+    /// 默认实现忽略检索入参，只包一层 [`StateProvider::snapshot`]，既有实现
+    /// 不覆盖也能工作；需要文本 / 向量检索时再覆盖。
+    ///
+    /// 检索失败不得阻断请求：返回仅含视图的结果，或返回 `Err` 让 runtime
+    /// 回退到 `snapshot`。
     fn query(&self, key: &RoutingKey, query: &StateQuery) -> Result<StateSnapshot, StateQueryError> {
         let _ = query;
         Ok(StateSnapshot::from_view(self.snapshot(key)))

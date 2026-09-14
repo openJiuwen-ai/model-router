@@ -93,7 +93,7 @@ let selection = ModelSelection::from(&decision);
 let feedback = Feedback {
     version: openjiuwen_protocol::feedback::FEEDBACK_VERSION,
     event_id: None,                            // 缺失表示未知
-    decision_id: decision.decision_id.clone(), // 由 runtime 在 route 返回前填充
+    route_id: decision.route_id.clone(), // 由 runtime 在 route 返回前填充
     key: RoutingKey {
         session_id: "sess-1".into(),
         agent_id: "react-agent".into(),
@@ -119,7 +119,7 @@ let _ = feedback;
 
 `Feedback` 是**具体非泛型结构**：稳定核心字段由协议层定义，宿主私有信号放进 `extensions: Vec<Extension>`，未知 `schema` 仅做结构校验后透传，明确不承诺语义 —— 这样扩展演进不会迫使协议核心发版。
 
-`Decision` 与 `ModelSelection` 字段相同（`selected_model_id` / `reasoning` / `is_answer_call` / `decision_id`），差别只在「是否可执行」：前者是 runtime 内部返回值，后者是跨边界规格。runtime 北向契约 `RouterProvider::route` 返回 `ModelSelection`。`decision_id` 由 runtime 在 `decide_loop::run` 之后生成，算法既不生成也不接收它，以此保证算法纯函数属性。
+`Decision` 与 `ModelSelection` 字段相同（`selected_model_id` / `reasoning` / `is_answer_call` / `route_id`），差别只在「是否可执行」：前者是 runtime 内部返回值，后者是跨边界规格。runtime 北向契约 `RouterProvider::route` 返回 `ModelSelection`。`route_id` 由 runtime 在 `decide_loop::run` 之后生成，算法既不生成也不接收它，以此保证算法纯函数属性。
 
 ## 主要模块
 
@@ -165,7 +165,7 @@ let _ = feedback;
 
 ### 反馈（`feedback.rs`）
 
-`Feedback` 字段：`version` / `event_id?` / `decision_id?` / `key` / `selected_model_id` / `observed_at_ms?` / `call?` / `extensions`。
+`Feedback` 字段：`version` / `event_id?` / `route_id?` / `key` / `selected_model_id` / `observed_at_ms?` / `call?` / `extensions`。
 
 | `Outcome` | 含义 |
 |-----------|------|
