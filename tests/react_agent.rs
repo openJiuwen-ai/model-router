@@ -113,6 +113,7 @@ impl ReActAgent {
             messages: vec![Message {
                 role: "user".into(),
                 content: question.into(),
+                tool_calls: Vec::new(),
             }],
             metadata: RequestMetadata {
                 session_id: Some(self.session_id.clone()),

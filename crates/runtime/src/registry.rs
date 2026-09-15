@@ -13,6 +13,8 @@ pub fn create_algorithm(name: &str) -> Result<Box<dyn AlgorithmProvider>, Router
         "weighted" => Ok(Box::new(samples::weighted::Weighted)),
         #[cfg(feature = "algo-rule_cascade")]
         "rule_cascade" => Ok(Box::new(samples::rule_cascade::RuleCascade)),
+        #[cfg(feature = "algo-stage_router")]
+        "stage_router" => Ok(Box::new(openjiuwen_algorithms::stage_router::StageRouter)),
         #[cfg(feature = "algo-signal")]
         "signal" => Ok(Box::new(samples::signal::Signal)),
         #[cfg(feature = "algo-ensemble")]

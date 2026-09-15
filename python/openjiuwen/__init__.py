@@ -25,6 +25,7 @@ __all__ = [
     "RouteRequest",
     "RouteHint",
     "Message",
+    "ToolCall",
     "RequestMetadata",
     "RoutingKey",
     "Feedback",
@@ -54,6 +55,7 @@ if TYPE_CHECKING:
         CallFeedback,
         Extension,
         Message,
+        ToolCall,
         ModelSelection,
         RequestMetadata,
         RouteContext,
@@ -75,6 +77,7 @@ else:
             CallFeedback,
             Extension,
             Message,
+            ToolCall,
             ModelSelection,
             RequestMetadata,
             RouteContext,
@@ -94,6 +97,7 @@ else:
         CallFeedback = None  # type: ignore[misc, assignment]
         Extension = None  # type: ignore[misc, assignment]
         Message = None  # type: ignore[misc, assignment]
+        ToolCall = None  # type: ignore[misc, assignment]
         ModelSelection = None  # type: ignore[misc, assignment]
         RequestMetadata = None  # type: ignore[misc, assignment]
         RouteContext = None  # type: ignore[misc, assignment]

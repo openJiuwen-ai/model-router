@@ -2,10 +2,21 @@
 
 from typing import Any, List, Optional, Union, Dict
 
+class ToolCall:
+    name: str
+    command: Optional[str]
+    def __init__(self, name: str, command: Optional[str] = ...) -> None: ...
+
 class Message:
     role: str
     content: str
-    def __init__(self, role: str, content: str) -> None: ...
+    tool_calls: List[ToolCall]
+    def __init__(
+        self,
+        role: str,
+        content: str = ...,
+        tool_calls: Optional[List[ToolCall]] = ...,
+    ) -> None: ...
 
 class RequestMetadata:
     session_id: Optional[str]

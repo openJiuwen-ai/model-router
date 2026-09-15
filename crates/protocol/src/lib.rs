@@ -17,7 +17,9 @@ pub use feedback::{
     CallFeedback, Extension, Feedback, FeedbackError, Outcome, Value, MAX_EXTENSIONS,
     VALUE_MAX_BYTES,
 };
-pub use request::{Message, RequestMetadata, RouteHint, RouteRequest, RoutingKey, TargetSet};
+pub use request::{
+    Message, RequestMetadata, RouteHint, RouteRequest, RoutingKey, TargetSet, ToolCall,
+};
 pub use selection::ModelSelection;
 pub use state_query::{
     RetrievedItem, StateQuery, StateQueryError, StateSnapshot, QUERY_MAX_RETRIEVED,

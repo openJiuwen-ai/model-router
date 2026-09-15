@@ -84,6 +84,35 @@ models = ["alpha", "beta"]
     assert "python_cost_aware" in decision.reasoning
 
 
+def test_stage_router_reads_openai_tool_calls():
+    router = Router.from_config(
+        {
+            "algorithm": "stage_router",
+            "state": {"backend": "memory"},
+            "targets": {"models": ["efficient", "capable"]},
+        }
+    )
+    decision = router.route_sync(
+        {
+            "messages": [
+                {"role": "user", "content": "fix it"},
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "type": "function",
+                            "function": {"name": "Bash", "arguments": "{}"},
+                        }
+                    ],
+                },
+                {"role": "tool", "content": "fatal: out of memory"},
+            ]
+        }
+    )
+    assert decision.selected_model_id == "capable"
+    assert "source=override" in decision.reasoning
+
+
 def test_remote_state_from_profile():
     router = Router.from_config(
         {

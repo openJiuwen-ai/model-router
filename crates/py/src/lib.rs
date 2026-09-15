@@ -22,7 +22,7 @@ use crate::convert::{extract_hint, extract_request, profile_from_obj};
 use crate::error::to_py;
 use crate::types::{
     PyFeedback, PyFeedbackStats, PyMessage, PyModelSelection, PyRequestMetadata, PyRetrievedItem,
-    PyRouteContext, PyRouteHint, PyRouteRequest, PyRoutingKey, PyStateQuery, PyStateView,
+    PyRouteContext, PyRouteHint, PyRouteRequest, PyRoutingKey, PyStateQuery, PyStateView, PyToolCall,
 };
 
 struct PyKvCoordinator {
@@ -126,6 +126,7 @@ fn _openjiuwen(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyStateQuery>()?;
     m.add_class::<PyRetrievedItem>()?;
     m.add_class::<PyMessage>()?;
+    m.add_class::<PyToolCall>()?;
     m.add_class::<PyRequestMetadata>()?;
     m.add_class::<PyRoutingKey>()?;
     m.add_class::<PyFeedback>()?;
