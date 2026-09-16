@@ -5,24 +5,63 @@ use pyo3::types::PyType;
 
 use openjiuwen_protocol::{
     Decision, Feedback, FeedbackStats, Message, ModelSelection, RequestMetadata, RetrievedItem,
-    RouteHint, RouteRequest, RoutingKey, StateQuery, StateView,
+    RouteHint, RouteRequest, RoutingKey, StateQuery, StateView, ToolCall,
 };
 
 use crate::convert;
+
+#[pyclass(name = "ToolCall", get_all, set_all)]
+#[derive(Clone, Debug, Default)]
+pub struct PyToolCall {
+    pub name: String,
+    pub command: Option<String>,
+}
+
+#[pymethods]
+impl PyToolCall {
+    #[new]
+    #[pyo3(signature = (name, command=None))]
+    fn new(name: String, command: Option<String>) -> Self {
+        Self { name, command }
+    }
+}
+
+impl From<&PyToolCall> for ToolCall {
+    fn from(call: &PyToolCall) -> Self {
+        Self {
+            name: call.name.clone(),
+            command: call.command.clone(),
+        }
+    }
+}
+
+impl From<&ToolCall> for PyToolCall {
+    fn from(call: &ToolCall) -> Self {
+        Self {
+            name: call.name.clone(),
+            command: call.command.clone(),
+        }
+    }
+}
 
 #[pyclass(name = "Message", get_all, set_all)]
 #[derive(Clone, Debug)]
 pub struct PyMessage {
     pub role: String,
     pub content: String,
+    pub tool_calls: Vec<PyToolCall>,
 }
 
 #[pymethods]
 impl PyMessage {
     #[new]
-    #[pyo3(signature = (role, content))]
-    fn new(role: String, content: String) -> Self {
-        Self { role, content }
+    #[pyo3(signature = (role, content, tool_calls=None))]
+    fn new(role: String, content: String, tool_calls: Option<Vec<PyToolCall>>) -> Self {
+        Self {
+            role,
+            content,
+            tool_calls: tool_calls.unwrap_or_default(),
+        }
     }
 }
 
@@ -31,6 +70,7 @@ impl From<&PyMessage> for Message {
         Self {
             role: m.role.clone(),
             content: m.content.clone(),
+            tool_calls: m.tool_calls.iter().map(ToolCall::from).collect(),
         }
     }
 }
@@ -40,6 +80,7 @@ impl From<&Message> for PyMessage {
         Self {
             role: m.role.clone(),
             content: m.content.clone(),
+            tool_calls: m.tool_calls.iter().map(PyToolCall::from).collect(),
         }
     }
 }

@@ -2,6 +2,8 @@
 
 pub mod algorithm_provider;
 pub mod evolving_provider;
+#[cfg(feature = "algo-stage_router")]
+pub mod stage_router;
 pub mod test_algo;
 
 pub use algorithm_provider::{AlgorithmProvider, RouteContext};

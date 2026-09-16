@@ -2,13 +2,13 @@
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList, PySequence, PyString, PyType};
+use pyo3::types::{PyDict, PyList, PyModule, PySequence, PyString, PyType};
 
 use openjiuwen_algorithms::RouteContext;
 use openjiuwen_protocol::{
     Extension, Message, Outcome, RequestMetadata, RetrievedItem, RouteHint, RouteRequest,
     RouterError, RoutingKey, StateQuery, StateSnapshot, StateView, MAX_EXTENSIONS,
-    QUERY_MAX_RETRIEVED,
+    QUERY_MAX_RETRIEVED, ToolCall,
 };
 use openjiuwen_runtime::config::{RouterProfile, StateConfig, TargetsConfig};
 
@@ -372,6 +372,7 @@ pub fn extract_message(obj: &Bound<'_, PyAny>) -> PyResult<Message> {
         return Ok(Message {
             role: dict_str(dict, "role")?.unwrap_or_default(),
             content: dict_str(dict, "content")?.unwrap_or_default(),
+            tool_calls: extract_tool_calls(dict)?,
         });
     }
     if let Ok(seq) = obj.downcast::<PySequence>() {
@@ -379,12 +380,62 @@ pub fn extract_message(obj: &Bound<'_, PyAny>) -> PyResult<Message> {
             return Ok(Message {
                 role: seq.get_item(0)?.extract()?,
                 content: seq.get_item(1)?.extract()?,
+                tool_calls: Vec::new(),
             });
         }
     }
     Err(PyValueError::new_err(
         "message must be Message, dict{role,content}, or (role, content)",
     ))
+}
+
+fn extract_tool_calls(message: &Bound<'_, PyDict>) -> PyResult<Vec<ToolCall>> {
+    let Some(raw_calls) = message.get_item("tool_calls")? else {
+        return Ok(Vec::new());
+    };
+    if raw_calls.is_none() {
+        return Ok(Vec::new());
+    }
+
+    let mut calls = Vec::new();
+    for raw in raw_calls.try_iter()? {
+        let raw = raw?;
+        let dict = raw.downcast::<PyDict>().map_err(|_| {
+            PyValueError::new_err("message.tool_calls items must be dictionaries")
+        })?;
+        let function_value = dict.get_item("function")?;
+        let function = match function_value.as_ref() {
+            Some(value) => value.downcast::<PyDict>().map_err(|_| {
+                PyValueError::new_err("tool_call.function must be a dictionary")
+            })?,
+            None => dict,
+        };
+        let name = dict_str(function, "name")?
+            .ok_or_else(|| PyValueError::new_err("tool_call.function.name is required"))?;
+        let command = match function.get_item("arguments")? {
+            Some(arguments) if !arguments.is_none() => command_from_arguments(&arguments)?,
+            _ => opt_dict_str(function, "command")?,
+        };
+        calls.push(ToolCall { name, command });
+    }
+    Ok(calls)
+}
+
+fn command_from_arguments(arguments: &Bound<'_, PyAny>) -> PyResult<Option<String>> {
+    if let Ok(dict) = arguments.downcast::<PyDict>() {
+        return opt_dict_str(dict, "command");
+    }
+    let Ok(text) = arguments.extract::<String>() else {
+        return Ok(None);
+    };
+    let json = PyModule::import(arguments.py(), "json")?;
+    let Ok(decoded) = json.call_method1("loads", (text,)) else {
+        return Ok(None);
+    };
+    match decoded.downcast::<PyDict>() {
+        Ok(dict) => opt_dict_str(dict, "command"),
+        Err(_) => Ok(None),
+    }
 }
 
 pub fn extract_metadata(obj: &Bound<'_, PyAny>) -> PyResult<RequestMetadata> {

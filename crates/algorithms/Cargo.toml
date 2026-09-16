@@ -11,6 +11,7 @@ default = [
     "algo-passthrough",
     "algo-weighted",
     "algo-rule_cascade",
+    "algo-stage_router",
     "algo-signal",
     "algo-ensemble",
     "evolving-mf",
@@ -18,6 +19,7 @@ default = [
 algo-passthrough = []
 algo-weighted = []
 algo-rule_cascade = []
+algo-stage_router = []
 algo-signal = []
 algo-ensemble = []
 evolving-mf = []

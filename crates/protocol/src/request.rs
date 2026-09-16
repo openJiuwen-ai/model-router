@@ -2,11 +2,19 @@
 
 use crate::state_query::StateQuery;
 
-/// 单条对话消息。协议层只搬运文本，不解释角色语义。
+/// 供路由算法观察的工具调用。`command` 仅在 shell 类工具提供命令时存在。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ToolCall {
+    pub name: String,
+    pub command: Option<String>,
+}
+
+/// 单条对话消息。协议层只搬运内容与路由所需的工具调用信号。
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Message {
     pub role: String,    // 角色
     pub content: String, // 内容
+    pub tool_calls: Vec<ToolCall>,
 }
 
 /// 请求元数据。`session_id` / `agent_id` 构成 [`RoutingKey`]。

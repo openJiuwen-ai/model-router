@@ -11,12 +11,14 @@ default = [
     "algo-passthrough",
     "algo-weighted",
     "algo-rule_cascade",
+    "algo-stage_router",
     "algo-signal",
     "algo-ensemble",
 ]
 algo-passthrough = ["openjiuwen-algorithms/algo-passthrough"]
 algo-weighted = ["openjiuwen-algorithms/algo-weighted"]
 algo-rule_cascade = ["openjiuwen-algorithms/algo-rule_cascade"]
+algo-stage_router = ["openjiuwen-algorithms/algo-stage_router"]
 algo-signal = ["openjiuwen-algorithms/algo-signal"]
 algo-ensemble = ["openjiuwen-algorithms/algo-ensemble"]
 

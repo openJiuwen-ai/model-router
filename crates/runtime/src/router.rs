@@ -321,4 +321,23 @@ models = ["alpha"]
         assert_ne!(plain.route_id, decision.route_id);
         assert_eq!(recorder.0.lock().unwrap().len(), 1, "no state_query → query not called");
     }
+
+    #[test]
+    fn stage_router_assembles_from_profile() {
+        let toml = r#"
+algorithm = "stage_router"
+[state]
+backend = "memory"
+[targets]
+models = ["efficient", "capable"]
+"#;
+        let router = Router::from_toml(toml).expect("assemble stage router");
+        let decision = router
+            .route(&RouteRequest::default(), &RouteHint::default())
+            .expect("route");
+
+        assert_eq!(router.algorithm_name(), "stage_router");
+        assert_eq!(decision.selected_model_id, "efficient");
+        assert!(decision.reasoning.contains("source=fall_open"));
+    }
 }

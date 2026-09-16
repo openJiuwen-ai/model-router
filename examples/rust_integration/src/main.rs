@@ -52,6 +52,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             messages: vec![Message {
                 role: "user".into(),
                 content: prompt.into(),
+                tool_calls: Vec::new(),
             }],
             metadata: RequestMetadata {
                 session_id: Some(session_id.into()),

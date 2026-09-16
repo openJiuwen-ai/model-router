@@ -11,7 +11,7 @@ pub mod trigger;
 pub use config::RouterProfile;
 pub use openjiuwen_protocol::{
     Decision, Feedback, Message, ModelSelection, Outcome, RequestMetadata, RouteHint, RouteRequest,
-    RouterError, RoutingKey,
+    RouterError, RoutingKey, ToolCall,
 };
 pub use registry::create_algorithm;
 pub use router::{KvCacheCoordinator, Router};

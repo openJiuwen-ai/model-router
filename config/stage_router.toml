@@ -1,0 +1,10 @@
+# Stage Router 约定：第一个目标是高效模型，第二个目标是能力模型。
+algorithm = "stage_router"
+
+[state]
+backend = "memory"
+ttl_secs = 300
+max_entries = 1024
+
+[targets]
+models = ["efficient-model", "capable-model"]
