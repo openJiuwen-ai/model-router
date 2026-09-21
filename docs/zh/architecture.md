@@ -1,7 +1,6 @@
 # openjiuwen-router 架构与插件接入指南
 
-> 本文以 `openjiuwen-router-blueprint.html` 为设计基线，以当前仓库代码为实现事实。
-> 蓝图中的目标能力与当前尚未完成的骨架会明确区分，避免把规划接口误认为已经可用。
+> 本文以当前仓库代码为实现依据。图文中的“蓝图规划”表示尚未完成的目标能力；未随仓库提供的历史蓝图不作为接入前提。
 
 ## 1. 项目定位
 
@@ -21,7 +20,7 @@ openjiuwen-router 是一个只负责“选择模型”的路由内核。它不�
 
 架构的核心目标是：
 
-- 算法保持纯函数，端侧 Rust、云侧 Rust 和云侧 Python 算法共用同一个决策模型。
+- 规则算法按纯函数设计，Rust 与 Python 插件共用决策契约；模型分类器的延迟和确定性由其后端决定。
 - 跨请求状态全部外置到 state，算法只读取一次性状态快照。
 - 模型调用归宿主，路由器只输出选择结果，不进入模型流量链路。
 - 插件通过稳定、窄小的函数契约接入，而不是继承复杂生命周期框架。
@@ -114,7 +113,7 @@ flowchart TB
 Runtime 是唯一的控制流拥有者：
 
 1. 从请求元数据生成 `RoutingKey`。
-2. 生成本次 `route` 的 `route_id`；读取当前 state 槽：`RouteHint.state_query` 为空时调用 `snapshot`，否则把 `route_id` 注入 `StateQuery` 后调用可选的 `query`；`query` 失败或返回越界时降级为 `snapshot`。
+2. 生成本次 `route` 的 `route_id`；读取当前 state 槽：`RouteHint.state_query` 为空时调用 `snapshot`，否则把 `route_id` 注入 `StateQuery` 后调用可选的 `query`；`query` 报错时回退 `snapshot`，Rust 后端返回的快照校验失败时保留 `view`、清空命中。
 3. 合并请求排除项和状态排除项。
 4. 组装只针对本次请求的 `RouteContext`。
 5. 调用当前 algorithm 槽的 `decide`。
@@ -122,7 +121,7 @@ Runtime 是唯一的控制流拥有者：
 7. 宿主自行调用模型。
 8. 宿主调用 `report`，runtime 将反馈转给 state。
 
-Algorithm 和 Evolving 不负责调度、不调用模型、不访问网络；State 负责所有跨请求记忆，但不能反向调用 Algorithm。
+Algorithm 不调用被选中的目标模型、不直接访问 state；允许通过自带后端运行辅助分类模型。Evolving 只负责训练计算。调度属于 runtime 或宿主，跨请求记忆属于 State，State 不能反向调用 Algorithm。
 
 ## 3. 数据视图
 
@@ -269,7 +268,7 @@ pub trait AlgorithmProvider: Send + Sync {
 - 允许自带决策辅助模型（如复杂度分类器）；但调用应尽量保持无状态纯调用，
   避免引入缓存、会话粘性等可变状态，以免削弱可重放性。这是实现者自身的责任。
 - 不读取系统时钟或全局随机数；需要随机性时只使用 `ctx.seed`。
-- 相同输入必须得到相同输出，便于重放和表驱动测试。
+- 规则策略应在相同输入下得到相同输出。x-router 的模型分类阶段可能不确定，不能据此承诺整个算法可逐字重放；其档位映射和 Bandit 计算可单独做确定性测试。
 - `ctx.view` 为空时仍须返回合法决策或明确的 `NoTarget`。
 - `name` 必须稳定且低基数，用于配置、注册和遥测。
 
@@ -309,7 +308,7 @@ pub trait StateProvider: Send + Sync {
 - `query` 由宿主的 `RouteHint.state_query` 触发；未携带检索意图时 runtime 直接走 `snapshot`，不产生额外开销。
 - `query` 返回 `StateSnapshot`：`view` 与 `snapshot` 同构，`retrieved` 承载 KNN 等检索命中。
 - 检索入参有硬上限：文本 16 KiB、向量 4 096 维、`top_k` ≤ 256、命中条数 ≤ 256；超限在 runtime 侧校验并降级，不进入 state。
-- 状态是 hint：有界、可丢失；远程超时应返回空视图而不是阻断请求。`query` 失败或返回越界时 runtime 降级为 `snapshot`，绝不阻断路由。
+- 状态是 hint：有界、可丢失；远程超时应返回空视图而不是阻断请求。`query` 报错时 runtime 降级为 `snapshot`；Rust 后端返回的快照校验失败时保留 `view`、清空命中。
 - `report` 是尽力而为的反馈入口，不应给 `route` 施加写入回压。
 - state 只接收**已通过协议校验**的反馈：校验在 runtime 侧完成（`Router::try_report` / Python `PyRouter.report`），state 实现不重复校验。
 - `publish` 服务于 evolving 的版本化产物发布；当前 trait 默认实现是 no-op。
@@ -423,7 +422,7 @@ pub trait RouterProvider: Send + Sync {
 
 注意：当前 `Router::route` 返回 `Decision`，`RouterProvider::route` 返回 `ModelSelection`。两者字段相同，但语义层级不同。
 
-`try_report` / `report` 是**同一校验语义的两个入口**：`try_report` 校验失败时返回 `FeedbackError` 且不写入 state；`report` 无返回值，是给不关心原因的宿主的兼容入口，内部委托 `try_report` 并在失败时静默丢弃。二者都同步执行、不等待写回完成。跨语言一致：Python `PyRouter.report` 直接走 `try_report`，把 `FeedbackError` 转成 Python 异常。
+`try_report` / `report` 是**同一校验语义的两个入口**：`try_report` 校验失败时返回 `FeedbackError` 且不写入 state；`report` 无返回值，是给不关心原因的宿主的兼容入口，内部委托 `try_report` 并在失败时静默丢弃。二者都同步调用 state，并等待其 `report` 回调返回；持久化或后台排队语义由具体 state 实现决定。跨语言一致：Python `PyRouter.report` 直接走 `try_report`，把 `FeedbackError` 转成 Python 异常。
 
 ### 5.2 Python 宿主接口
 
@@ -458,9 +457,9 @@ request = {
 | `algorithm` | string | 必填 | 已登记的算法名；未登记或对应 feature 未编译时，装配期返回 `RouterError::Config` |
 | `[state] backend` | string | 必填 | `memory` / `remote` / Python `register_state` 登记的自定义名 |
 | `[state] ttl_secs` | int | 300 | 仅 memory：条目过期时间（秒） |
-| `[state] max_entries` | int | 1024 | 仅 memory：容量上界；满员且新 key 写入时移除最旧条目 |
+| `[state] max_entries` | int | 1024 | 仅 memory：容量上界；满员且新 key 写入时移除 HashMap 迭代得到的一项，不保证最旧或 LRU 顺序 |
 | `[state] endpoint` | string | remote 时必填 | 仅 remote：状态服务地址，缺失时装配期报 `Config` 错误 |
-| `[state] timeout_ms` | int | 5 | 仅 remote：硬超时（毫秒），超时降级为空视图 |
+| `[state] timeout_ms` | int | 5 | 仅 remote：预留超时参数（毫秒）；当前不发 RPC，该参数没有实际超时效果 |
 | `[targets] models` | string list | `[]` | 候选模型目录；为空时任何 `route` 都会得到 `NoTarget` |
 | `[[evolving]] name` | string | 该表存在时必填 | 训练任务名；当前只解析、不生效 |
 | `[[evolving]] kind` | string | 无 | 产物类型标记；当前只解析、不生效 |
@@ -555,6 +554,8 @@ fn call_once() -> Result<(), Box<dyn std::error::Error>> {
 如果宿主有统一插件容器，可持有 `Box<dyn RouterProvider>` 或 `Arc<dyn RouterProvider>`，以 `route/report/algorithm_name` 作为插件协议。
 
 ### 6.2 Python 项目接入
+
+Python 发行包名为 `jiuwen-model-router`，导入路径仍为 `openjiuwen`。当前导入路径与 openJiuwen Core 重叠，请在独立环境中安装。
 
 在本仓库根目录构建并安装扩展：
 
@@ -687,7 +688,7 @@ Python 侧的随包算法由 `discover` 在 `import openjiuwen` 时扫描并列�
 | `python_cost_aware` | `test_algo/cost_aware.py` | 示例：按类属性成本表选最低成本目标 |
 | `python_last_available` | `test_algo2/last_available.py` | 示例：选过滤后目录的末项目标 |
 
-后两个是写法参考，仅用于演示 `AlgorithmProvider` 的最小形态。 `x-router` 是成建制实现，需要 `openjiuwen[x-router]` 这个 extra 才能用模型分类；不装则回落到内置的启发式分类。
+后两个是写法参考，仅用于演示 `AlgorithmProvider` 的最小形态。x-router 已有实现，模型分类需要 `jiuwen-model-router[x-router]` extra。纯启发式模式必须保留 `[x-router.classifier_model]` 并显式设置 `enabled = false`；缺失该表或模型加载失败会在装配时报错。
 
 ### 7.2 Rust Algorithm
 
@@ -771,7 +772,7 @@ router = Router.from_config({
 - 子类定义时即校验：必须实现 `decide`、必须设置非空 `name`、必须能无参构造；违反任一规则在类定义时抛 `TypeError`。
 - 扩展未构建时，子类先进入 `_pending` 队列，扩展可用后由 `bind_register` 补登记，因此插件模块的 import 顺序不受构建状态影响。
 - `import openjiuwen` 时 `discover.install()` 扫描 `openjiuwen` 的并列子包（跳过 `_` 前缀），把其中带稳定 `name` 的 `AlgorithmProvider` 子类全部写入 Rust 槽；同名去重，先见先得。
-- `openjiuwen.check_purity(algo, request, ctx)` 用相同输入连续调用 `decide` 并比对输出，用于验收纯函数纪律。
+- `openjiuwen.check_purity(algo, request, ctx)` 用相同输入连续调用 `decide` 并比对输出，适用于纯规则算法；不要用于调用真实分类器的 x-router。
 - `Algorithm` 是 `AlgorithmProvider` 的旧别名，仅为兼容保留，新代码不要使用。
 
 ## 8. 实现与替换 State
@@ -953,7 +954,7 @@ let job = TrainingJob {
     selector: DataSelector {
         watermark_key: "router-feedback".into(),
         min_samples: 100,
-        prompts: host_journal.drain_training_prompts(), // Vec<TrainingPrompt>
+        prompts: Vec::new(), // 示例使用空批次；实际接入时传入宿主 journal 的 Vec<TrainingPrompt>
     },
     publish: PublishPlan {
         slot: "state.my_weights".into(),
@@ -1053,4 +1054,3 @@ let artifact = job.run_once(&MyTrainer);
 | Python 扩展类型存根 | `python/openjiuwen/_openjiuwen.pyi` |
 | 端到端示例宿主 | `tests/react_agent.rs`, `tests/react_agent.py` |
 | 宿主集成示例 | `examples/python_integration.py`, `examples/rust_integration/` |
-

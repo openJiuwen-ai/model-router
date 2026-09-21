@@ -1,8 +1,7 @@
 """Loads and runs the classifier model.
 
-Shared by both deployment shapes: :class:`~openjiuwen.x_router.backends.LocalBackend`
-calls it in process, and :mod:`openjiuwen.x_router.classifier.server` exposes it
-over HTTP for deployments where several hosts share one accelerator.
+Used in process by :class:`~openjiuwen.x_router.classifier.backend.LocalBackend`
+and by the optional local judge. This package does not provide an HTTP server.
 
 Heavy imports happen inside methods. ``import openjiuwen`` must not pull in
 torch, and this module is importable without the ``x-router`` extra installed so
@@ -68,7 +67,7 @@ class ClassifierEngine(object):
             except ImportError as exc:
                 raise EngineError(
                     "the model-backed classifier needs extra packages; "
-                    "pip install 'openjiuwen[x-router]'"
+                    "pip install 'jiuwen-model-router[x-router]'"
                 ) from exc
 
             try:

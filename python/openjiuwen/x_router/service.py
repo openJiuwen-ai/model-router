@@ -21,7 +21,7 @@ returns, so a slow judge never sits on the request path.
 
 What this does not change: the host still supplies the response and the cost,
 because nothing else has them; and the kernel is untouched — this module lives
-where x-router already absorbs kernel gaps (DESIGN.md §2, §5), and shrinks to
+where x-router already absorbs kernel gaps (see facade.py), and shrinks to
 a shell if the runtime ever grows a settle stage of its own.
 
 Because settling is asynchronous, its failures cannot reach the ``report``
@@ -98,7 +98,7 @@ def retrieval_text(messages, max_chars):
     # type: (Sequence[Any], int) -> str
     """The text the store indexes: the classifier's own preview, capped in bytes.
 
-    Same view as the classifier sees (one text view, DESIGN.md 3.5), then cut to
+    Same view as the classifier sees (see conversation_preview), then cut to
     the kernel's byte limit on a character boundary.
     """
     text = conversation_preview(messages, max_chars)

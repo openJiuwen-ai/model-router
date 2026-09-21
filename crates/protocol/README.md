@@ -6,11 +6,11 @@
 
 其他 crate 只经本层对话：宿主构造 `RouteRequest`，算法返回 `Decision`，state 产出 `StateView`、吸收 `Feedback`。任何一层可独立替换，只要仍说这套类型。
 
-`RouteContext`（`targets` / `view` / `seed`）在 `openjiuwen-algorithms` 中定义，不属于本 crate。
+`RouteContext`（`targets` / `view` / `retrieved` / `seed`）在 `openjiuwen-algorithms` 中定义，不属于本 crate。
 
 ## 为什么协议层必须零依赖
 
-- **替换边界硬**：算法、state、runtime 互不直接依赖，只共享本层类型。
+- **依赖边界明确**：算法和 state 互不直接依赖，runtime 依赖两者完成装配；各层共享本层类型。
 - **端云同构**：同一套结构在进程内引用传递，也可作为跨语言 / RPC 的载荷规格（`ModelSelection`）。
 - **无隐藏 I/O**：协议层不发网络、不读时钟；`latency_ms` 用整数毫秒，避免依赖时间库。
 - **可测试**：构造几个结构体就能驱动 `decide` / `snapshot` / `report`，不必拉完整运行时。
@@ -67,6 +67,7 @@ let req = RouteRequest {
     messages: vec![Message {
         role: "user".into(),
         content: "What is 21 * 2?".into(),
+        ..Message::default()
     }],
     metadata: RequestMetadata {
         session_id: Some("sess-1".into()),
@@ -85,7 +86,7 @@ let key = req.routing_key();
 算法返回 `Decision`；跨 PyO3 / rail 覆盖槽时投影为 `ModelSelection`。宿主调完模型后构造 `Feedback`。
 
 ```rust
-use openjiuwen_protocol::{CallFeedback, Extension, Feedback, ModelSelection, Outcome, RoutingKey, Value};
+use openjiuwen_protocol::{CallFeedback, Decision, Extension, Feedback, ModelSelection, Outcome, RoutingKey, Value};
 
 let decision = Decision::answer("strong-cloud", "passthrough: first available target");
 let selection = ModelSelection::from(&decision);
@@ -119,7 +120,7 @@ let _ = feedback;
 
 `Feedback` 是**具体非泛型结构**：稳定核心字段由协议层定义，宿主私有信号放进 `extensions: Vec<Extension>`，未知 `schema` 仅做结构校验后透传，明确不承诺语义 —— 这样扩展演进不会迫使协议核心发版。
 
-`Decision` 与 `ModelSelection` 字段相同（`selected_model_id` / `reasoning` / `is_answer_call` / `route_id`），差别只在「是否可执行」：前者是 runtime 内部返回值，后者是跨边界规格。runtime 北向契约 `RouterProvider::route` 返回 `ModelSelection`。`route_id` 由 runtime 在 `decide_loop::run` 之后生成，算法既不生成也不接收它，以此保证算法纯函数属性。
+`Decision` 与 `ModelSelection` 字段相同（`selected_model_id` / `reasoning` / `is_answer_call` / `route_id`），都是数据载荷：前者是算法与 runtime 使用的类型，后者是北向契约 `RouterProvider::route` 的返回类型。`route_id` 由 runtime 在读 state 前生成，传给可选的 `query`，在 `decide_loop::run` 返回后写入决策；它不进入算法的 `RouteContext`。
 
 ## 主要模块
 
@@ -128,7 +129,8 @@ let _ = feedback;
 | 类型 | 作用 |
 |------|------|
 | `RouteRequest` | 路由入参：`messages` + `metadata` + `exclusions` |
-| `Message` | 单条对话；协议层只搬运文本，不解释角色 |
+| `Message` | 单条对话：`role` / `content` / `tool_calls` |
+| `ToolCall` | 路由所需的工具信号：`name` / 可选 `command` |
 | `RequestMetadata` | `session_id` / `agent_id` → `RoutingKey` |
 | `RoutingKey` | state 快照的键空间 |
 | `TargetSet` | 可选模型语义名；`without` 按原顺序剔除排除项 |
@@ -161,7 +163,7 @@ let _ = feedback;
 | `StateSnapshot` | `query` 返回：`view`（与 `snapshot` 同构）+ `retrieved`；`retrieved` 为空即等价旧行为 |
 | `StateQueryError` | 校验 / 后端错误；`Extension` 变体复用反馈侧的 `FeedbackError` |
 
-硬上限：文本 16 KiB（`QUERY_MAX_TEXT_BYTES`）、向量 4 096 维（`QUERY_MAX_VECTOR_DIMS`）、`top_k` ≤ 256（`QUERY_MAX_TOP_K`）、命中 ≤ 256 条（`QUERY_MAX_RETRIEVED`）。`extensions` 与 `Feedback.extensions` 共用同一套 `Value` 预算。runtime 在调用算法前校验；不合格时降级为 `snapshot`，绝不阻断请求。
+硬上限：文本 16 KiB（`QUERY_MAX_TEXT_BYTES`）、向量 4 096 维（`QUERY_MAX_VECTOR_DIMS`）、`top_k` ≤ 256（`QUERY_MAX_TOP_K`）、命中 ≤ 256 条（`QUERY_MAX_RETRIEVED`）。`extensions` 与 `Feedback.extensions` 共用同一套 `Value` 预算。runtime 在调用算法前校验；查询无效或后端报错时降级为 `snapshot`；Rust 后端返回的快照校验失败时保留其中的 `view`、丢弃 `retrieved`。
 
 ### 反馈（`feedback.rs`）
 
@@ -174,7 +176,7 @@ let _ = feedback;
 | `Unavailable` | 模型不可用，写入排除 hint |
 | `Rejected` | 语义失败，**不**驱动排除 |
 
-`CallFeedback.latency_ms` 为 `Option<u64>` 毫秒，`cache_valid` 为 `Option<bool>`，供状态层学习 KV cache 重建成本。`call = None` 表示结果未知（延迟反馈），此时 state 不做任何更新。
+`CallFeedback.latency_ms` 为 `Option<u64>` 毫秒，`cache_valid` 为 `Option<bool>`，供状态层按需消费。`call = None` 表示没有单次调用结果，此时 MemoryState 不更新；自定义 state 仍可消费延迟反馈中的 `extensions`，例如 Bandit 的质量评分。
 
 `Feedback::validate` 是唯一校验入口，`Router::try_report` 与 Python `PyRouter.report` 都先经它；失败返回 `FeedbackError` 且不写入 state。扩展载荷 `Value` 是零依赖 JSON 子集，预算按实际类型计费（字符串记 UTF-8 字节，其余节点记 8 字节），跨全部扩展累计。
 

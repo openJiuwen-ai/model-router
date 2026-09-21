@@ -21,7 +21,8 @@ RESEARCH = "vendor-b/deep"
 REASONING = "vendor-c/reasoning"
 
 # The classifier runs in this process. Point it at weights; there is no server
-# to start. Omit this table, or set enabled = false, to run heuristic-only.
+# to start. Keep this table and set enabled = false to run heuristic-only;
+# omitting it is a configuration error.
 [x-router.classifier_model]
 enabled = true
 model_path = "/path/to/Qwen/Qwen3-0.6B"

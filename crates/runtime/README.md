@@ -16,7 +16,7 @@
 - **装配错误提前暴露**：未知算法名、未知 backend、TOML 读失败在 `from_config` 就返回 `RouterError::Config`。
 - **一套内核两种形态**：`memory` / `remote` 只在 `from_profile` 选一次实现。
 
-Rust 原生宿主主路径（蓝图图 2）：
+Rust 原生宿主主路径：
 
 ```text
 from_config → Router
@@ -105,7 +105,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-`Feedback::delayed(key, model)` 用于结果未知的场景（`call = None`，state 不做更新）。要挂载应用私有信号，用 `openjiuwen_protocol::{Extension, Value}` 填 `feedback.extensions`；该路径需直接依赖 protocol crate，`openjiuwen_runtime` 只重导出 `Feedback` / `Outcome` 等必需类型。
+`Feedback::delayed(key, model)` 用于没有单次调用结果的场景（`call = None`，MemoryState 不做更新；自定义 state 仍可消费扩展）。要挂载应用私有信号，用 `openjiuwen_protocol::{Extension, Value}` 填 `feedback.extensions`；该路径需直接依赖 protocol crate，`openjiuwen_runtime` 只重导出 `Feedback` / `Outcome` 等必需类型。
 
 测试或配置中心下发文本时用 `Router::from_toml`。`Feedback.key` 必须与 `route` 时的 `RoutingKey` 相同，否则排除/亲和对不上。
 
@@ -115,10 +115,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 `route` 每次把 `seed` 加一后交给 `decide_loop::run`：
 
-1. `state.snapshot(&req.routing_key())`
+1. 生成 `route_id`；无检索意图时调用 `state.snapshot`，否则把 id 交给 `state.query`
 2. 合并 `req.exclusions` 与 `view.exclusions`，从目录里 `without`
-3. 组装 `RouteContext { targets, view, seed }`
-4. `algorithm.decide(req, &ctx)` → `Decision`
+3. 组装 `RouteContext { targets, view, retrieved, seed }`
+4. `algorithm.decide(req, &ctx)` → `Decision`，随后由 runtime 填入 `route_id`
 
 端到端（首选失败 → `report(Unavailable)` → 下次 snapshot 换模）见：
 
@@ -146,9 +146,10 @@ cargo test -p openjiuwen-runtime --test react_agent -- --nocapture
 应用把本项目当 plugin 嵌入时看这个 trait：`route` → `ModelSelection`，`report`，`algorithm_name`。装配不在 trait 上。
 
 ```rust
-use openjiuwen_runtime::{RouteHint, Router, RouterProvider};
+use openjiuwen_runtime::{RouteHint, RouteRequest, Router, RouterProvider};
 
 let router = Router::from_config("config/edge.toml")?;
+let req = RouteRequest::default();
 let plugin: &dyn RouterProvider = &router;
 let selection = plugin.route(&req, &RouteHint::default())?;
 // 应用自己调用 selection.selected_model_id
@@ -176,7 +177,7 @@ let selection = plugin.route(&req, &RouteHint::default())?;
 - `feedbacks` 来自 `StateProvider`：state 是 hint 层，**不保留原始请求与决策**，只有聚合反馈。
 - `prompts`（`TrainingPrompt` 三元组：请求 / 决策 / 反馈）来自**宿主 journal**，经 `DataSelector::with_prompts` 传入。runtime 在 `route` 时不落盘决策与请求，因此这是唯一能拿到原始 prompt 文本的通道。
 
-`DataSelector::select` 只做透传与批量校验，不做字段拼装。
+`DataSelector::select` 当前只复制宿主提供的 `prompts`，不拉取 feedback，也不执行批量校验；宿主需显式校验批次后再训练。
 
 ### 与其它 crate 的关系
 

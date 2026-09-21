@@ -1,7 +1,6 @@
 # openjiuwen-router Architecture and Plugin Integration Guide
 
-> This document uses `openjiuwen-router-blueprint.html` as the design baseline and the current repository code as the implementation ground truth.
-> Target capabilities from the blueprint and currently unfinished skeletons are clearly distinguished, so planned interfaces are not mistaken for usable ones.
+> This document describes the current repository implementation. Paths marked "blueprint plan" are unfinished target capabilities; the historical blueprint is not included in this repository and is not required for integration.
 
 ## 1. Project Positioning
 
@@ -21,7 +20,7 @@ Host constructs a RouteRequest
 
 The core architectural goals are:
 
-- Algorithms stay pure functions; edge-side Rust, cloud-side Rust, and cloud-side Python algorithms share the same decision model.
+- Rule-based algorithms are designed as pure functions; Rust and Python plugins share the decision contract. Model-classifier latency and determinism depend on the backend.
 - All cross-request state is externalized into state; algorithms only read a one-shot state snapshot.
 - Model calls belong to the host; the router only outputs a selection result and never enters the model traffic path.
 - Plugins integrate through stable, narrow function contracts instead of inheriting a complex lifecycle framework.
@@ -114,7 +113,7 @@ Solid lines in the diagram represent the current main call chain; dashed lines m
 The Runtime is the sole owner of control flow:
 
 1. Generate a `RoutingKey` from request metadata.
-2. Generate this route's `route_id`; read the current state slot: call `snapshot` when `RouteHint.state_query` is empty, otherwise inject the `route_id` into the `StateQuery` and call the optional `query`; fall back to `snapshot` if `query` fails or returns out-of-bounds data.
+2. Generate this route's `route_id`; read the current state slot: call `snapshot` when `RouteHint.state_query` is empty, otherwise inject the `route_id` into the `StateQuery` and call the optional `query`; fall back to `snapshot` if `query` fails; if a returned Rust snapshot fails validation, retain its `view` and discard the hits.
 3. Merge request exclusions and state exclusions.
 4. Assemble a `RouteContext` scoped to this request only.
 5. Call `decide` on the current algorithm slot.
@@ -122,7 +121,7 @@ The Runtime is the sole owner of control flow:
 7. The host invokes the model itself.
 8. The host calls `report`, and the runtime forwards the feedback to state.
 
-Algorithm and Evolving do not schedule, do not call models, and do not access the network; State owns all cross-request memory but cannot call back into the Algorithm.
+Algorithm does not call the selected target model or access state directly, but it may run an auxiliary classifier through its own backend. Evolving performs training computation only. Runtime or the host owns scheduling; State owns cross-request memory and cannot call back into Algorithm.
 
 ## 3. Data View
 
@@ -268,7 +267,7 @@ Design discipline:
 - `decide` does not call the **selected target model** (calling it is the host's job) and does not access state.
 - A decision-aiding model of the algorithm's own (e.g. a complexity classifier) is allowed; its calls should stay stateless and side-effect-free where possible, avoiding caches, session affinity, or other mutable state that would weaken replayability. This is the implementer's own responsibility.
 - It does not read the system clock or global randomness; when randomness is needed, only `ctx.seed` is used.
-- Identical inputs must produce identical outputs, enabling replay and table-driven tests.
+- Rule-based policies should produce identical outputs for identical inputs. The model-classification stage of x-router may be nondeterministic; test its tier mapping and bandit calculations separately rather than promising exact replay of the entire algorithm.
 - When `ctx.view` is empty, it must still return a legal decision or an explicit `NoTarget`.
 - `name` must be stable and low-cardinality, used for configuration, registration, and telemetry.
 
@@ -308,7 +307,7 @@ Design discipline:
 - `query` is triggered by the host's `RouteHint.state_query`; when no retrieval intent is carried, the runtime goes straight to `snapshot` with no extra cost.
 - `query` returns a `StateSnapshot`: `view` is isomorphic to `snapshot`, and `retrieved` carries retrieval hits such as KNN results.
 - Retrieval inputs have hard limits: 16 KiB of text, 4,096 vector dimensions, `top_k` ≤ 256, and at most 256 hits; over-limit inputs are validated and degraded on the runtime side and never reach state.
-- State is a hint: bounded and lossy; remote timeouts should return an empty view instead of blocking the request. When `query` fails or returns out-of-bounds data, the runtime degrades to `snapshot` and never blocks routing.
+- State is a hint: bounded and lossy; remote timeouts should return an empty view instead of blocking the request. When `query` fails, the runtime degrades to `snapshot`; when a returned Rust snapshot fails validation, its `view` is retained and its hits are discarded.
 - `report` is a best-effort feedback entry and must not apply write backpressure to `route`.
 - State only receives feedback that **has already passed protocol validation**: validation happens on the runtime side (`Router::try_report` / Python `PyRouter.report`), and state implementations do not re-validate.
 - `publish` serves evolving's versioned artifact publication; the current trait default implementation is a no-op.
@@ -422,7 +421,7 @@ pub trait RouterProvider: Send + Sync {
 
 Note: currently `Router::route` returns `Decision`, while `RouterProvider::route` returns `ModelSelection`. Their fields are identical, but their semantic levels differ.
 
-`try_report` and `report` are **two entries with the same validation semantics**: `try_report` returns a `FeedbackError` on failure and does not write to state; `report` has no return value and is the compatibility entry for hosts that do not care about the reason — it delegates to `try_report` and silently drops on failure. Both execute synchronously and do not wait for write-back to finish. This is consistent across languages: Python's `PyRouter.report` goes straight through `try_report` and converts `FeedbackError` into a Python exception.
+`try_report` and `report` are **two entries with the same validation semantics**: `try_report` returns a `FeedbackError` on failure and does not write to state; `report` has no return value and is the compatibility entry for hosts that do not care about the reason — it delegates to `try_report` and silently drops on failure. Both call state synchronously and wait for its `report` callback to return; persistence or background queuing semantics depend on the state implementation. This is consistent across languages: Python's `PyRouter.report` goes straight through `try_report` and converts `FeedbackError` into a Python exception.
 
 ### 5.2 Python Host Interface
 
@@ -457,9 +456,9 @@ request = {
 | `algorithm` | string | required | Registered algorithm name; unregistered names or uncompiled features fail at assembly time with `RouterError::Config` |
 | `[state] backend` | string | required | `memory` / `remote` / a custom name registered via Python `register_state` |
 | `[state] ttl_secs` | int | 300 | memory only: entry TTL in seconds |
-| `[state] max_entries` | int | 1024 | memory only: capacity bound; when full and a new key is reported, the oldest entry is evicted |
+| `[state] max_entries` | int | 1024 | memory only: capacity bound; when full and a new key is reported, an entry from HashMap iteration is evicted; oldest-entry or LRU order is not guaranteed |
 | `[state] endpoint` | string | required for remote | remote only: state service address; a missing value fails assembly with a `Config` error |
-| `[state] timeout_ms` | int | 5 | remote only: hard timeout in milliseconds; timeouts degrade to an empty view |
+| `[state] timeout_ms` | int | 5 | remote only: reserved timeout in milliseconds; the current implementation sends no RPC, so this value has no timeout effect |
 | `[targets] models` | string list | `[]` | Candidate model catalog; when empty, every `route` returns `NoTarget` |
 | `[[evolving]] name` | string | required if the table is present | Training job name; currently parsed only, not effective |
 | `[[evolving]] kind` | string | none | Artifact kind marker; currently parsed only, not effective |
@@ -554,6 +553,8 @@ fn call_once() -> Result<(), Box<dyn std::error::Error>> {
 If the host has a unified plugin container, it can hold a `Box<dyn RouterProvider>` or `Arc<dyn RouterProvider>`, using `route/report/algorithm_name` as the plugin protocol.
 
 ### 6.2 Python Project Integration
+
+The Python distribution is `jiuwen-model-router`; the import package remains `openjiuwen`. That import path still overlaps with openJiuwen Core, so use a separate environment.
 
 Build and install the extension at the repository root:
 
@@ -686,7 +687,7 @@ Bundled Python algorithms are auto-installed by `discover` scanning sibling subp
 | `python_cost_aware` | `test_algo/cost_aware.py` | Example: picks the lowest-cost target from a class-attribute cost table |
 | `python_last_available` | `test_algo2/last_available.py` | Example: picks the last target in the filtered catalog |
 
-The latter two are references for writing custom Python algorithms and demonstrate the minimal `AlgorithmProvider` shape.  `x-router` is a full implementation; classifying with a model needs the `openjiuwen[x-router]` extra, and without it x-router falls back to its built-in heuristic classifier.
+The latter two demonstrate the minimal `AlgorithmProvider` shape. x-router is implemented; model classification needs the `jiuwen-model-router[x-router]` extra. Heuristic-only mode requires an explicit `[x-router.classifier_model]` table with `enabled = false`; an absent table or failed model load raises during assembly.
 
 ### 7.2 Rust Algorithm
 
@@ -770,7 +771,7 @@ Key details of the registration mechanism:
 - Subclasses are validated at definition time: they must implement `decide`, set a non-empty `name`, and be constructible with no arguments; violating any rule raises `TypeError` at class definition.
 - When the extension is not built, subclasses enter a `_pending` queue and are registered later by `bind_register` once the extension becomes available, so plugin module import order does not depend on build state.
 - On `import openjiuwen`, `discover.install()` scans sibling subpackages of `openjiuwen` (skipping `_`-prefixed ones) and writes every `AlgorithmProvider` subclass with a stable `name` into the Rust slot; names are deduplicated, first one wins.
-- `openjiuwen.check_purity(algo, request, ctx)` calls `decide` repeatedly with identical inputs and compares the outputs, for verifying pure-function discipline.
+- `openjiuwen.check_purity(algo, request, ctx)` calls `decide` repeatedly with identical inputs and compares the outputs. Use it for pure rule-based algorithms, not x-router with a live classifier.
 - `Algorithm` is a legacy alias of `AlgorithmProvider`, kept for compatibility; do not use it in new code.
 
 ## 8. Implementing and Replacing State
@@ -952,7 +953,7 @@ let job = TrainingJob {
     selector: DataSelector {
         watermark_key: "router-feedback".into(),
         min_samples: 100,
-        prompts: host_journal.drain_training_prompts(), // Vec<TrainingPrompt>
+        prompts: Vec::new(), // Empty demo batch; supply Vec<TrainingPrompt> from the host journal in real use
     },
     publish: PublishPlan {
         slot: "state.my_weights".into(),

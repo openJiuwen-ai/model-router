@@ -3,10 +3,11 @@ requires = ["maturin>=1.7,<2"]
 build-backend = "maturin"
 
 [project]
-name = "openjiuwen"
+name = "jiuwen-model-router"
 version = "0.1.0"
 description = "openjiuwen-router Python 门面（PyO3 / maturin）"
 requires-python = ">=3.8"
+license = { text = "Apache-2.0" }
 
 [project.optional-dependencies]
 # Needed to classify with a model. Without it, x-router runs only in heuristic
@@ -23,6 +24,7 @@ manifest-path = "crates/py/Cargo.toml"
 python-source = "python"
 module-name = "openjiuwen._openjiuwen"
 features = ["extension-module"]
+include = [{ path = "LICENSE", format = ["sdist", "wheel"] }]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

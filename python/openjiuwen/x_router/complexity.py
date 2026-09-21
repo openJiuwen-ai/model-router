@@ -3,7 +3,7 @@
 The prompt template, the preview rules and the heuristic thresholds are frozen.
 The classifier is a stock small model, so these are not a contract with a
 checkpoint — they are what determines its behaviour, and changing any of them
-makes benchmark runs incomparable. See DESIGN.md section 4.
+makes benchmark runs incomparable. See README.md, "Classifier" and "Tests".
 """
 
 from __future__ import annotations

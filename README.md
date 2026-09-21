@@ -2,27 +2,27 @@
 
 ## 简介
 
-`openjiuwen-router` 是 openJiuwen 的模型路由内核：根据请求与状态快照选出一个模型。项目以 Rust 为核心，通过 Cargo workspace 分层实现协议、状态、算法和运行时，并预留 Python（PyO3 / maturin）门面，方便端侧 crate 依赖与云侧 wheel 复用同一套决策逻辑。
+`openjiuwen-router` 是 openJiuwen 的模型路由内核：根据请求与状态快照选出一个模型。项目以 Rust 为核心，通过 Cargo workspace 分层实现协议、状态、算法和运行时，并提供 Python（PyO3 / maturin）门面，方便端侧 crate 依赖与云侧 wheel 复用同一套决策逻辑。Python 发行包名为 `jiuwen-model-router`，导入路径为 `openjiuwen`。
 
-宿主（agent / 网关 / 端侧应用）调用 `Router::route` 拿到 `Decision`，自己去调选中的模型，再把结果 `report` 回来。算法是纯函数——同样的 `(request, ctx)` 必须给出同样的决策；跨请求记忆全部外置到 state。
+宿主（agent / 网关 / 端侧应用）调用 `Router::route` 拿到 `Decision`，自己去调选中的模型，再把结果 `report` 回来。规则算法按纯函数设计，跨请求记忆外置到 state；x-router 的模型分类器会执行推理，其延迟和确定性取决于后端。
 
 核心能力包括：
 
 - `Router` 门面：`from_config` / `route` / `report`；北向契约 `RouterProvider` 在 runtime；
 - 可插拔算法槽（`AlgorithmProvider`）与状态槽（`StateProvider`），运行期各生效一个；
 - 协议层类型：`RouteRequest`、`Decision`、`ModelSelection`、`Feedback`、`StateView`；
-- 端云两套 TOML profile（进程内 state / 远程 state 客户端）；
-- 面向 Python 的 PyO3 扩展与内置 Python 算法包（骨架）。
+- 两套 TOML profile（可用的进程内 state / 尚未接入 RPC 的远程 state 占位）；
+- 面向 Python 的 PyO3 扩展、算法与状态反向绑定，以及 x-router 算法包。
 
-架构与插件接入指南见 [`docs/zh/architecture.md`](docs/zh/architecture.md)（[English](docs/en/architecture.md)）。当前仓库是按蓝图搭起来的 workspace 骨架：目录、契约、装配和一条可跑的 ReAct 验证路径已经对齐；加权算法、远程 state gRPC、完整 PyO3 绑定仍是桩。
+架构与插件接入指南见 [`docs/zh/architecture.md`](docs/zh/architecture.md)（[English](docs/en/architecture.md)）。Rust 路由、MemoryState、Stage Router、PyO3 绑定与 Python x-router 已有实现和集成示例；部分示意算法、远程 state RPC、通用训练调度及 KV 回调仍未完成，具体范围见下方“当前进度”。
 
 ## 为什么选择这套内核
 
-- **决策与执行分离**：算法只返回 `selected_model_id` 与 `reasoning`，模型调用由宿主履行，路由器不会成为流量瓶颈。
-- **纯函数可复用**：算法不调用被选中的目标模型、不持有可变状态，端云、Rust / Python 宿主共用同一契约。
+- **决策与执行分离**：算法返回模型选择和原因，目标模型调用由宿主履行；使用分类器时，分类推理仍会增加路由延迟。
+- **契约可复用**：算法不调用被选中的目标模型，跨请求记忆通过 state 提供，Rust / Python 宿主共用同一契约。
 - **单槽可插拔**：一个路由实例运行期只跑一个算法、一套 state；候选来自注册表，装配期选定。
-- **状态是 hint**：丢失只降质为冷路由。远程实现硬超时返回空视图，而不是让请求失败。
-- **一套内核、两种形态**：端云差异收敛在 TOML profile，不在业务代码里分叉。
+- **状态是 hint**：丢失时回到冷路由。远程后端的设计要求是超时返回空视图；当前 RemoteState 不发网络，直接返回空视图。
+- **配置装配**：状态与算法通过 TOML profile 选择；远程状态服务尚未实现。
 - **可嵌入**：Rust 宿主静态链接 `openjiuwen-runtime`（`Router` / `RouterProvider`）。云侧可再经 PyO3 导出为 Python 扩展。
 
 ## 仓库结构
@@ -74,8 +74,6 @@ model-router/
 rustflags = ["-C", "link-self-contained=yes"]
 ```
 
-工具链目录与 rust-analyzer 环境变量与本机 `rust_demo_mod_04` 对齐（`RUSTUP_HOME` / `CARGO_HOME` 见 `.vscode/settings.json`）。
-
 ### 编译 Rust 核心
 
 ```bash
@@ -95,28 +93,34 @@ cargo build -p openjiuwen-runtime
 
 ### 构建 Python 扩展
 
-在已激活的 Python 虚拟环境中安装 `maturin`，然后执行：
+在仓库根目录创建并激活 Python 虚拟环境，然后安装构建工具并编译扩展：
 
 ```bash
+python -m venv .venv
+source .venv/bin/activate  # Windows PowerShell: .venv\Scripts\Activate.ps1
+python -m pip install 'maturin>=1.7,<2'
 maturin develop
 ```
 
-安装后可以使用 `openjiuwen` 包。`Router.from_config` 接受路径或 dict；`route` / `report` 在 Python 侧是 async，同步内核仍在 Rust。跨边界类型是 `RouteRequest`、`ModelSelection`（别名 `Decision`）、`Feedback`。远程状态走 profile `state.backend = "remote"`；自定义状态用 Python `StateProvider`（`state=` / `register_state`）。`import openjiuwen` 会扫描并列子包中的随包 Python 算法并写入 Rust 槽；包外 `AlgorithmProvider` 子类在 import 时同样按 `name` 登记（必须实现 `decide`、能无参构造）。扩展未构建时，`AlgorithmProvider` 仍可单独导入。
+该命令安装发行包 `jiuwen-model-router`；代码中仍使用 `import openjiuwen`。发行名与导入名不同，当前导入路径仍与 openJiuwen Core 重叠，请使用独立虚拟环境。
+
+`Router.from_config` 接受路径或 dict；下面使用可直接在脚本中运行的 `route_sync` / `report_sync`。`route` / `report` 虽声明为 async，内部仍同步执行，可能阻塞事件循环。跨边界类型是 `RouteRequest`、`ModelSelection`（别名 `Decision`）、`Feedback`。自定义状态用 Python `StateProvider`（`state=` / `register_state`）；`remote` 后端目前只是占位。
+
+`import openjiuwen` 会扫描并列子包中的随包 Python 算法并写入 Rust 槽；包外 `AlgorithmProvider` 子类在 import 时同样按 `name` 登记（必须实现 `decide`、能无参构造）。扩展未构建时，`AlgorithmProvider` 仍可单独导入。
 
 ```python
-import openjiuwen
-from openjiuwen import Feedback, Outcome, Router
+from openjiuwen import Feedback, Router
 
-router = Router.from_config("config/cloud.toml")
+router = Router.from_config("config/edge.toml")
 # 或 Router.from_config({"algorithm": "passthrough", "state": {"backend": "memory"}, "targets": {"models": ["a"]}})
 
-decision = await router.route({
+decision = router.route_sync({
     "messages": [{"role": "user", "content": "hi"}],
     "session_id": "s1",
     "agent_id": "host",
 })
 # 宿主自己调用 decision.selected_model_id
-await router.report(Feedback.ok(decision, latency_ms=12, session_id="s1", agent_id="host"))
+router.report_sync(Feedback.ok(decision, latency_ms=12, session_id="s1", agent_id="host"))
 ```
 
 Python 测试（`tests/test_package.py` 不需要扩展；`tests/test_native_router.py` 需要已安装的 `_openjiuwen`）：
@@ -127,11 +131,11 @@ pytest tests/test_package.py tests/test_native_router.py
 
 ## 样例 1：Rust 原生宿主
 
-宿主静态链接 `openjiuwen-runtime`，进程内 `route` 取决策，自己调用模型后再 `report`。这是蓝图图 2 的形态（crate 直接依赖，无 PyO3）。
+宿主静态链接 `openjiuwen-runtime`，进程内 `route` 取决策，自己调用模型后再 `report`（crate 直接依赖，无 PyO3）。以下代码在仓库根目录运行，读取 `config/edge.toml`。
 
 ```rust
 use openjiuwen_runtime::{
-    Feedback, Outcome, RequestMetadata, RouteHint, RouteRequest, Router,
+    Feedback, RequestMetadata, RouteHint, RouteRequest, Router,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -154,13 +158,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 宿主自己调用 decision.selected_model_id 对应的模型后端
     // 路由器不经手流量
 
-    router.report(Feedback {
-        key: req.routing_key(),
-        selected_model_id: decision.selected_model_id.clone(),
-        outcome: Outcome::Ok, // Overflow / Unavailable 会写入排除 hint
-        latency_ms: 40,
-        cache_valid: None,
-    });
+    let mut feedback = Feedback::ok(req.routing_key(), &decision.selected_model_id, 40);
+    feedback.route_id = decision.route_id.clone();
+    router.try_report(feedback)?;
 
     Ok(())
 }
@@ -188,7 +188,7 @@ max_entries = 1024
 models = ["local-default"]
 ```
 
-云侧（`config/cloud.toml`）只把 `state.backend` 换成 `remote`，算法仍是同一份 Rust 实现。
+`config/cloud.toml` 展示 `remote` 与训练配置，但当前远程后端不发起 RPC，反馈不会保存，训练配置也未接线。验证路由反馈闭环请使用 `memory`。
 
 ## 样例 2：最小 ReAct 宿主验证路由
 
@@ -227,7 +227,7 @@ step 2
 test react_agent_routes_retries_and_answers ... ok
 ```
 
-这条路径覆盖蓝图图 2 的 ①–⑨。ReAct 循环本身属于宿主，不属于 Router。
+这条路径覆盖路由、模型失败、反馈排除和再次选模的闭环。ReAct 循环本身属于宿主，不属于 Router。
 
 ## 样例 3：最小宿主集成（examples/）
 
@@ -281,8 +281,9 @@ pytest tests/test_package.py tests/test_native_router.py
 
 - 五层 crate 目录与公开契约（`RouterProvider` / `AlgorithmProvider` / `StateProvider` / `Router`）；
 - `from_config` 装配算法槽与 state 槽；
-- passthrough 决策、memory 排除 hint、ReAct 集成测试；
+- passthrough 决策、Stage Router 信号规则、memory 排除 hint、ReAct 集成测试；
 - Python 门面：`RouteRequest` / `ModelSelection` / `Feedback` 绑定，以及 `AlgorithmProvider` 子类入槽 / `register_state` 反向包装。
+- 可选状态检索与 `route_id` 关联；Python x-router 的复杂度分档、Bandit 历史反馈修正和后台评分封装。
 
 仍是骨架 / 未接线：
 
@@ -290,6 +291,7 @@ pytest tests/test_package.py tests/test_native_router.py
 - `RemoteState` 尚未真正发 gRPC（超时降级为空视图）；
 - `[[evolving]]` 能解析，但未挂到 `Trigger` / `TrainingJob`；
 - `report` 在 `memory` 后端下是同步写入，蓝图中的异步旁路尚未做。
+- Python 真正异步桥接、`cache_affinity` 消费和 KV coordinator 回调触发尚未实现。
 
 ## 贡献
 
@@ -303,6 +305,6 @@ pytest tests/test_package.py tests/test_native_router.py
 
 ## 许可证
 
-本项目采用 Apache-2.0 发布（许可证声明与 workspace `Cargo.toml` 一致）。
+本项目采用 [Apache License 2.0](LICENSE) 发布，与 workspace 和 Python 发行包的许可证声明一致。
 
 本项目提供模型路由决策能力，不内置任何具体 AI 模型，也不转发模型请求流量。将路由接入具体业务场景时，使用者应自行承担数据安全、内容安全、许可及适用法律法规要求下的合规责任。

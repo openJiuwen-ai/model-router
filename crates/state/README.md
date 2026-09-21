@@ -15,7 +15,7 @@
 - **算法保持纯函数**：跨请求信息经 `snapshot` 变成 `StateView`，由 runtime 塞进 `RouteContext.view`。
 - **端云同一契约**：端侧进程内 `memory`、云侧 `remote` 客户端，宿主只看 `StateProvider`。
 - **失败可降级**：远程超时 → 空视图，请求继续；排除 / 亲和对不上只是冷启动。
-- **写回与决策分离**：`report` 异步、尽力而为；下一轮 `snapshot` 才看得见。
+- **写回与决策分离**：宿主调用模型后再 `report`；当前接口和 MemoryState 写入均同步执行，队列化异步写回尚未实现。
 
 ## 仓库结构
 
@@ -87,7 +87,7 @@ impl StateProvider for NullState {
 
 ### 可选：覆写 `query` 做精细检索
 
-`snapshot` 只能给固定的视图字段；需要按查询文本 / 向量检索时，覆写 `query`：
+`snapshot` 只能给固定的视图字段；需要按查询文本 / 向量检索时，覆写 `query`。下面用固定命中演示返回结构，不执行真实 KNN；接入时可将命中生成替换为自己的索引查询：
 
 ```rust
 use openjiuwen_protocol::{
@@ -95,9 +95,7 @@ use openjiuwen_protocol::{
 };
 use openjiuwen_state::{CasConflict, StateProvider};
 
-pub struct KnnState {
-    index: MyVectorIndex,
-}
+pub struct KnnState;
 
 impl StateProvider for KnnState {
     fn snapshot(&self, _key: &RoutingKey) -> StateView {
@@ -105,14 +103,15 @@ impl StateProvider for KnnState {
     }
 
     fn query(&self, _key: &RoutingKey, query: &StateQuery) -> Result<StateSnapshot, StateQueryError> {
-        // embedding 属于 state 的 I/O；这里只示意检索结果的形状。
-        let hits = self.index.search(query.text.as_deref(), query.vector.as_deref(), query.top_k);
+        // 可运行的 mock：只演示检索结果的形状。
+        let retrieved = if query.is_empty() {
+            Vec::new()
+        } else {
+            vec![RetrievedItem::new("example-neighbor", 1.0)]
+        };
         Ok(StateSnapshot {
             view: StateView::empty(),
-            retrieved: hits
-                .into_iter()
-                .map(|h| RetrievedItem::new(h.id, h.score))
-                .collect(),
+            retrieved,
         })
     }
 
@@ -124,7 +123,7 @@ impl StateProvider for KnnState {
 }
 ```
 
-入参有硬上限，超限在 runtime 侧就被拒并降级：文本 16 KiB、向量 4 096 维、`top_k` ≤ 256、命中条数 ≤ 256。`query` 返回的 `StateSnapshot` 会在交给算法前再做一次校验（条数 / 分数有限 / 载荷预算）；不合规或 `Err` 时 runtime 自动退回 `snapshot`，请求照常完成。
+入参有硬上限，超限在 runtime 侧就被拒并降级：文本 16 KiB、向量 4 096 维、`top_k` ≤ 256、命中条数 ≤ 256。`query` 返回的 `StateSnapshot` 会在交给算法前再做一次校验（条数 / 分数有限 / 载荷预算）；返回 `Err` 时回退 `snapshot`，返回不合规快照时保留其中的 `view`、清空 `retrieved`。
 
 宿主通过 `RouteHint.state_query` 触发检索；未携带检索意图时不会调用 `query`。
 
@@ -137,7 +136,7 @@ use openjiuwen_state::MemoryState;
 let state = MemoryState::new(Duration::from_secs(300), 1024);
 ```
 
-`Unavailable` / `Overflow` 写入 `view.exclusions`；`Ok` 更新 `affinity`；`Rejected` 只记统计。TTL 过期后该键视为空。容量满时丢最旧条目（骨架，不是完整 LRU）。
+`Unavailable` / `Overflow` 写入 `view.exclusions`；`Ok` 更新 `affinity`；`Rejected` 只记统计。`snapshot` 会移除已过期的键；`report` 会续期整个键，当前不会先重置其中的过期数据。容量满且写入新键时删除 HashMap 迭代得到的一项，不保证最旧或 LRU 顺序。
 
 ## 主要模块
 

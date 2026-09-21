@@ -1,7 +1,7 @@
 """Configuration, assembly, and request shaping.
 
 Two kernel limitations are absorbed here, which is why this module exists at
-all. Both are described in DESIGN.md section 5. The bandit adds a third of the
+all. Both are described below. The bandit adds a third of the
 same kind (G6): a custom state backend receives nothing from ``[state]``, so
 ``BanditStore`` is configured from ``[x-router.bandit.store]`` and handed to the
 kernel as an instance.
@@ -161,7 +161,7 @@ def _resolve_state(profile, params, state):
 
     The store is declared twice — ``[state] backend`` names it, the sub-table
     configures it — because the kernel requires a backend name and cannot carry
-    the parameters (DESIGN.md G6). Requiring both to agree means neither a
+    the parameters (see this module's configuration notes). Requiring both to agree means neither a
     forgotten sub-table nor a forgotten backend line can quietly produce a
     router whose bandit never warms up.
     """

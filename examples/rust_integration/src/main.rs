@@ -16,7 +16,8 @@ use openjiuwen_runtime::{
     Feedback, Message, Outcome, RequestMetadata, RouteHint, RouteRequest, Router,
 };
 
-// 与 config/edge.toml 等价的内联 profile；也可以 Router::from_config("config/edge.toml")。
+// 使用与 config/edge.toml 相同的 memory 后端，增加第二个目标以演示失败换模。
+// 从仓库根目录启动时，也可以 Router::from_config("config/edge.toml")。
 const PROFILE: &str = r#"
 algorithm = "passthrough"
 
@@ -71,7 +72,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Ok(reply) => {
                 let mut feedback = Feedback::ok(request.routing_key(), &decision.selected_model_id, 1);
                 feedback.route_id = decision.route_id.clone();
-                router.report(feedback);
+                router.try_report(feedback)?;
                 println!("reply: {reply}");
                 return Ok(());
             }
@@ -83,7 +84,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let mut feedback = Feedback::ok(request.routing_key(), &decision.selected_model_id, 1);
                 feedback.route_id = decision.route_id.clone();
                 feedback.call.as_mut().unwrap().outcome = Outcome::Unavailable;
-                router.report(feedback);
+                router.try_report(feedback)?;
                 exclusions.push(decision.selected_model_id.clone());
             }
         }

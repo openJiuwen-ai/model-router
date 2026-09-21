@@ -6,6 +6,8 @@
 
 Python 宿主只看北向门面：`from_config` 装配，`route` 取 `ModelSelection`，自己调模型，再 `report`。决策与执行仍然分离；流量不经过本层。
 
+Python 发行包名为 `jiuwen-model-router`；Rust crate 名和 Python 导入路径 `openjiuwen` 保持不变。在仓库根目录构建：
+
 ```bash
 maturin develop
 ```
@@ -24,16 +26,16 @@ maturin develop
 | `Router.from_toml(text)` | 测试或下发文本 |
 | `await router.route(request, hint=None)` | 云侧 async 门面；内核同步。返回 `ModelSelection` |
 | `router.route_sync(request, hint=None)` | 不要 event loop 时用 |
-| `await router.report(feedback)` | fire-and-forget；Python 侧 async 立刻返回 |
+| `await router.report(feedback)` | async 包装；内部同步执行，等待 state 回调返回 |
 | `router.report_sync(feedback)` | 同步转发 state |
 | `router.algorithm_name()` | 当前算法槽稳定名 |
 | `register_state(obj)` | 按 `obj.name` 写入进程内注册表；`state.backend` 命中后优先于 `memory` / `remote` |
 
 `request` 可以是 `RouteRequest` 或 dict（`messages` / `metadata` 或顶层 `session_id`+`agent_id` / `exclusions`）。`hint` 可以是 `RouteHint`、`str`（当作 `cache_affinity`）、dict 或 `None`；dict 支持 `state_query` 键，可用 `StateQuery` 实例，也可直接给 `{"text": ..., "vector": [...], "top_k": ...}`。
 
-`route` 返回 **`ModelSelection`**（`Decision` 是同一类型的别名）。字段：`selected_model_id` / `reasoning` / `is_answer_call`；`target` 是 `selected_model_id` 的别名。
+`route` 返回 **`ModelSelection`**（`Decision` 是同一类型的别名）。字段：`selected_model_id` / `reasoning` / `is_answer_call` / `route_id`；`target` 是 `selected_model_id` 的别名。
 
-远程状态走 profile `state.backend = "remote"` + `endpoint`；自定义状态走 `StateProvider`。
+远程状态配置为 `state.backend = "remote"` + `endpoint`，但当前实现不发 RPC，读取为空且反馈不保存；需要实际状态时使用 `memory` 或自定义 `StateProvider`。
 
 ### 跨边界载荷
 
@@ -48,7 +50,7 @@ maturin develop
 | `RouteHint` | 每请求 hint：`cache_affinity` + `state_query`（可选检索入参） |
 | `ModelSelection`（`Decision`） | `route` 出参；宿主拿 `selected_model_id` 去调模型，并保留 `route_id` 以便 `report` 关联 |
 | `Feedback` | 回报：`key` + `selected_model_id` + `call`（`outcome` / `latency_ms?` / `cache_valid?`）+ `extensions` |
-| `CallFeedback` | 单次调用结果；`call=None` 表示延迟反馈，state 不更新 |
+| `CallFeedback` | 单次调用结果；`call=None` 表示延迟反馈，MemoryState 不更新，自定义 state 仍可消费扩展 |
 | `Extension` | `schema` / `version` / `data`；宿主私有信号走这里，未知 schema 只做结构校验 |
 | `StateQuery` | 检索入参：`text?` / `vector?` / `top_k?` / `extensions`；`StateQuery.text_query(text, top_k?)` 是文本便捷构造 |
 | `RetrievedItem` | 单条命中：`id` / `score` / `data?`；也可用 dict 传入 |

@@ -12,7 +12,8 @@ it returns a model id and your application makes the call.
 
 ## Install
 
-`openjiuwen` is a Rust extension built with maturin, so install it from a
+The Python distribution is `jiuwen-model-router`; its import package remains
+`openjiuwen`. It is a Rust extension built with maturin, so install it from a
 checkout rather than from an index. Use a virtual environment: a system Python
 on Debian or Ubuntu is marked externally managed and refuses to install into
 itself.
@@ -23,7 +24,7 @@ pip install maturin
 maturin develop --extras x-router                    # builds the extension, pulls the extra
 ```
 
-The extra pulls in torch and transformers. The classifier is not optional:
+The `jiuwen-model-router[x-router]` extra pulls in torch and transformers. The classifier is not optional:
 assembling a router without one is an error, and the built-in heuristic is a
 fallback for a classifier that fails at request time, or a mode you select
 explicitly with `enabled = false` — never a default.

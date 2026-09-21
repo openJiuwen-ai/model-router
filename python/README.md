@@ -1,5 +1,7 @@
 # Python 目录
 
+Python 发行包名为 `jiuwen-model-router`，导入包名仍为 `openjiuwen`；构建与安装方式见[根 README](../README.md)。当前导入路径与 openJiuwen Core 重叠，两者请使用独立环境。
+
 `python/` 明确分为两部分：
 
 ```text

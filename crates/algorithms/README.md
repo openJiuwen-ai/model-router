@@ -113,9 +113,10 @@ impl AlgorithmProvider for FirstAvailable {
 |------|------|
 | `targets` | 本次可选目标（已剔除请求 exclusions 与 state 排除 hint） |
 | `view` | 状态快照；可为空，必须能降级 |
+| `retrieved` | 可选的状态检索命中；无检索或检索失败时可为空 |
 | `seed` | 显式注入的随机种子，保证可重放 |
 
-返回的 `Decision` 三个字段：`selected_model_id`（与 `TargetSet` 对齐的语义名）、`reasoning`（必填）、`is_answer_call`（本架构默认应答调用）。
+算法填写 `Decision` 的 `selected_model_id`（与 `TargetSet` 对齐的语义名）、`reasoning`（原因）和 `is_answer_call`（是否应答调用）；`Decision::answer` 将 `route_id` 置空，由 runtime 在返回宿主前填入。
 
 ## 样例 2：在线自演进（EvolvingProvider）
 

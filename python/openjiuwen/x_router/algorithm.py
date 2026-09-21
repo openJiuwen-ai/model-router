@@ -74,7 +74,7 @@ class XRouter(AlgorithmProvider):
     instead of decoding greedily, and batched inference is not bitwise
     reproducible, so adjacent tiers flip on a near tie; against a stubbed backend
     it always passes and proves nothing. The deterministic half of the decision is covered directly instead,
-    by the truth table over :func:`decide_by_tier`. See DESIGN.md section 3.7.
+    by the truth table over :func:`decide_by_tier`. See README.md, "Tests".
 
     The slot requires no-argument construction, so parameters live on the class.
     Use :func:`specialize` rather than setting them by hand.
