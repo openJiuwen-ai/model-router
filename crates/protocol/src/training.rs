@@ -86,6 +86,10 @@ impl TrainingPrompt {
     }
 
     /// 严格校验：prompt 文本长度、消息条数与单条长度、扩展载荷预算。
+    ///
+    /// # Errors
+    ///
+    /// 文本、消息或扩展载荷超限，或内嵌反馈校验失败时返回 [`TrainingError`]。
     pub fn validate(&self) -> Result<(), TrainingError> {
         if let Some(text) = &self.text {
             if text.len() > TRAINING_MAX_TEXT_BYTES {
@@ -110,11 +114,14 @@ impl TrainingPrompt {
         if self.extensions.len() > MAX_EXTENSIONS {
             return Err(TrainingError::Extension(FeedbackError::PayloadTooLarge));
         }
-        let mut count = 0;
-        let mut bytes = 0;
+        let mut count: usize = 0;
+        let mut bytes: usize = 0;
         for ext in &self.extensions {
             ext.validate().map_err(TrainingError::Extension)?;
-            bytes += ext.schema.len() + ext.version.len();
+            crate::feedback::add_payload_budget(&mut bytes, ext.schema.len())
+                .map_err(TrainingError::Extension)?;
+            crate::feedback::add_payload_budget(&mut bytes, ext.version.len())
+                .map_err(TrainingError::Extension)?;
             ext.data
                 .validate_inner(1, &mut count, &mut bytes)
                 .map_err(TrainingError::Extension)?;
@@ -145,7 +152,10 @@ impl std::fmt::Display for TrainingError {
         match self {
             Self::TooManyPrompts => write!(f, "training prompts exceed {TRAINING_MAX_PROMPTS}"),
             Self::TextTooLarge => {
-                write!(f, "training prompt text exceeds {TRAINING_MAX_TEXT_BYTES} bytes")
+                write!(
+                    f,
+                    "training prompt text exceeds {TRAINING_MAX_TEXT_BYTES} bytes"
+                )
             }
             Self::TooManyMessages => {
                 write!(f, "training prompt messages exceed {TRAINING_MAX_MESSAGES}")
@@ -191,6 +201,7 @@ mod tests {
                 messages: vec![Message {
                     role: "user".into(),
                     content: "hello".into(),
+                    ..Message::default()
                 }],
                 ..RouteRequest::default()
             })
@@ -205,7 +216,8 @@ mod tests {
 
     #[test]
     fn text_and_message_bounds() {
-        let too_long = TrainingPrompt::new(key()).with_text("x".repeat(TRAINING_MAX_TEXT_BYTES + 1));
+        let too_long =
+            TrainingPrompt::new(key()).with_text("x".repeat(TRAINING_MAX_TEXT_BYTES + 1));
         assert_eq!(too_long.validate(), Err(TrainingError::TextTooLarge));
 
         let mut request = RouteRequest::default();
@@ -213,6 +225,7 @@ mod tests {
             Message {
                 role: "user".into(),
                 content: "ok".into(),
+                ..Message::default()
             };
             TRAINING_MAX_MESSAGES + 1
         ];
@@ -225,6 +238,7 @@ mod tests {
         request.messages = vec![Message {
             role: "user".into(),
             content: "x".repeat(TRAINING_MAX_MESSAGE_BYTES + 1),
+            ..Message::default()
         }];
         assert_eq!(
             TrainingPrompt::new(key()).with_request(request).validate(),

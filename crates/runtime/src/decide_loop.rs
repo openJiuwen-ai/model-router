@@ -1,7 +1,7 @@
 //! 决策循环：snapshot/query → 装配 RouteContext → decide → Decision。
 
 use openjiuwen_algorithms::{AlgorithmProvider, RouteContext};
-use openjiuwen_protocol::{Decision, StateView, RouteHint, RouteRequest, RouterError, TargetSet};
+use openjiuwen_protocol::{Decision, RouteHint, RouteRequest, RouterError, StateView, TargetSet};
 use openjiuwen_state::StateProvider;
 
 /// 读取状态：有检索意图走 `query`，否则走基础 `snapshot`。
@@ -34,15 +34,20 @@ fn read_state(
 ///
 /// `route_id` 由调用方（`Router::route`）在进入前生成，这里只把它交给 state 的
 /// `query`；写回 `Decision` 仍由调用方完成，算法全程不接触它。
+///
+/// # Errors
+///
+/// 算法决策失败时返回 [`RouterError`]，例如过滤排除项后没有可用目标。
 pub fn run(
-    algorithm: &dyn AlgorithmProvider,    // 算法实例       
-    state: &dyn StateProvider,    // 状态实例
-    req: &RouteRequest,    // 路由请求
-    hint: &RouteHint,    // 路由提示
-    catalog: &TargetSet,    // 目标集合
-    seed: u64,    // 随机种子
-    route_id: &str,    // 本次 route 的关联 id，仅透传给 state.query
-) -> Result<Decision, RouterError> {    // 返回的是 Result<Decision, RouterError> 类型。
+    algorithm: &dyn AlgorithmProvider, // 算法实例
+    state: &dyn StateProvider,         // 状态实例
+    req: &RouteRequest,                // 路由请求
+    hint: &RouteHint,                  // 路由提示
+    catalog: &TargetSet,               // 目标集合
+    seed: u64,                         // 随机种子
+    route_id: &str,                    // 本次 route 的关联 id，仅透传给 state.query
+) -> Result<Decision, RouterError> {
+    // 返回的是 Result<Decision, RouterError> 类型。
     let (view, retrieved) = read_state(state, &req.routing_key(), hint, route_id);
     let mut exclusions = req.exclusions.clone();
     // 排除列表扩展。

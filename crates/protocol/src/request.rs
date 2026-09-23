@@ -21,7 +21,7 @@ pub struct Message {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RequestMetadata {
     pub session_id: Option<String>, // 会话id
-    pub agent_id: Option<String>, // agent id
+    pub agent_id: Option<String>,   // agent id
 }
 
 impl RequestMetadata {
@@ -80,7 +80,7 @@ impl TargetSet {
 /// 注意：因 [`StateQuery`] 携带浮点向量，本结构体只派生 `PartialEq`。
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RouteHint {
-    pub cache_affinity: Option<String>, // 缓存亲和性提示
+    pub cache_affinity: Option<String>,  // 缓存亲和性提示
     pub state_query: Option<StateQuery>, // 可选的状态检索意图
 }
 
@@ -95,14 +95,14 @@ impl RouteHint {
 /// 路由入参。`exclusions` 由宿主重试逻辑填写。
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RouteRequest {
-    pub messages: Vec<Message>, // 消息
+    pub messages: Vec<Message>,    // 消息
     pub metadata: RequestMetadata, // 请求元数据
-    pub exclusions: Vec<String>, // 排除列表
+    pub exclusions: Vec<String>,   // 排除列表
 }
 
 impl RouteRequest {
     /// 获取路由键。
     pub fn routing_key(&self) -> RoutingKey {
-        self.metadata.routing_key()    // 获取请求元数据的路由键。
+        self.metadata.routing_key() // 获取请求元数据的路由键。
     }
 }

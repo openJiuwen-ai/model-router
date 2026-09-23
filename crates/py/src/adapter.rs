@@ -34,9 +34,8 @@ impl AlgorithmProvider for PyAlgorithmAdapter {
 
     fn decide(&self, request: &RouteRequest, ctx: &RouteContext) -> Result<Decision, RouterError> {
         Python::with_gil(|py| {
-            let py_req = convert::py_route_request(py, request).map_err(|e| {
-                RouterError::Algorithm(format!("encode request: {e}"))
-            })?;
+            let py_req = convert::py_route_request(py, request)
+                .map_err(|e| RouterError::Algorithm(format!("encode request: {e}")))?;
             let py_ctx = convert::py_route_context(py, ctx)
                 .map_err(|e| RouterError::Algorithm(format!("encode context: {e}")))?;
             let result = self

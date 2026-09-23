@@ -77,50 +77,77 @@ pub enum Value {
     Object(Vec<(String, Value)>),
 }
 
+/// 把 `extra` 累加进字节或元素预算。
+///
+/// # Errors
+///
+/// 加法溢出时返回 [`FeedbackError::PayloadTooLarge`]。是否超过业务上限由调用方继续判断。
+pub(crate) fn add_payload_budget(total: &mut usize, extra: usize) -> Result<(), FeedbackError> {
+    *total = total
+        .checked_add(extra)
+        .ok_or(FeedbackError::PayloadTooLarge)?;
+    Ok(())
+}
+
+fn child_depth(depth: usize) -> Result<usize, FeedbackError> {
+    depth.checked_add(1).ok_or(FeedbackError::NestedTooDeep)
+}
+
 impl Value {
     /// 严格校验：嵌套深度、元素总数、非有限数。
+    ///
+    /// # Errors
+    ///
+    /// 嵌套过深、元素或字节超限、出现非有限数或重复键时返回 [`FeedbackError`]。
     pub fn validate(&self) -> Result<(), FeedbackError> {
-        let mut count = 0usize;
-        self.validate_inner(1, &mut count, &mut 0)
+        let mut count: usize = 0;
+        self.validate_inner(1, &mut count, &mut 0usize)
     }
 
     /// 按 `(depth, count, bytes)` 累计校验；供反馈与状态检索共用同一套预算。
+    ///
+    /// # Errors
+    ///
+    /// 字节或元素超限、嵌套过深、出现非有限数、对象键重复，或计数溢出时返回 [`FeedbackError`]。
     pub fn validate_inner(
         &self,
         depth: usize,
         count: &mut usize,
         bytes: &mut usize,
     ) -> Result<(), FeedbackError> {
-        *bytes += match self {
+        let extra = match self {
             Value::String(s) => s.len(),
             _ => 8,
         };
+        add_payload_budget(bytes, extra)?;
         if *bytes > VALUE_MAX_BYTES {
             return Err(FeedbackError::PayloadTooLarge);
         }
         if depth > VALUE_MAX_DEPTH {
             return Err(FeedbackError::NestedTooDeep);
         }
-        *count += 1;
+        add_payload_budget(count, 1)?;
         if *count > VALUE_MAX_ELEMENTS {
             return Err(FeedbackError::PayloadTooLarge);
         }
         match self {
             Value::Float(f) if !f.is_finite() => Err(FeedbackError::NonFiniteNumber),
             Value::Array(items) => {
+                let next = child_depth(depth)?;
                 for it in items {
-                    it.validate_inner(depth + 1, count, bytes)?;
+                    it.validate_inner(next, count, bytes)?;
                 }
                 Ok(())
             }
             Value::Object(pairs) => {
                 let mut keys = std::collections::HashSet::new();
+                let next = child_depth(depth)?;
                 for (k, v) in pairs {
                     if !keys.insert(k) {
                         return Err(FeedbackError::DuplicateKey);
                     }
-                    *bytes += k.len();
-                    v.validate_inner(depth + 1, count, bytes)?;
+                    add_payload_budget(bytes, k.len())?;
+                    v.validate_inner(next, count, bytes)?;
                 }
                 Ok(())
             }
@@ -149,6 +176,10 @@ pub struct Extension {
 
 impl Extension {
     /// 严格校验：schema / version 非空，data 受约束。
+    ///
+    /// # Errors
+    ///
+    /// schema 或 version 为空、载荷超限、嵌套过深、非有限数、重复键或计数溢出时返回 [`FeedbackError`]。
     pub fn validate(&self) -> Result<(), FeedbackError> {
         if self.schema.trim().is_empty() {
             return Err(FeedbackError::EmptySchema);
@@ -156,8 +187,10 @@ impl Extension {
         if self.version.trim().is_empty() {
             return Err(FeedbackError::EmptyVersion);
         }
-        let mut bytes = self.schema.len() + self.version.len();
-        self.data.validate_inner(1, &mut 0, &mut bytes)
+        let mut bytes: usize = 0;
+        add_payload_budget(&mut bytes, self.schema.len())?;
+        add_payload_budget(&mut bytes, self.version.len())?;
+        self.data.validate_inner(1, &mut 0usize, &mut bytes)
     }
 }
 
@@ -219,6 +252,10 @@ impl Feedback {
     }
 
     /// 校验协议版本、全部扩展及它们的合计节点/字节预算。
+    ///
+    /// # Errors
+    ///
+    /// 协议版本不支持、扩展条数或载荷超限，或任一扩展校验失败时返回 [`FeedbackError`]。
     pub fn validate(&self) -> Result<(), FeedbackError> {
         if self.version != FEEDBACK_VERSION {
             return Err(FeedbackError::UnsupportedVersion);
@@ -226,11 +263,12 @@ impl Feedback {
         if self.extensions.len() > MAX_EXTENSIONS {
             return Err(FeedbackError::PayloadTooLarge);
         }
-        let mut count = 0;
-        let mut bytes = 0;
+        let mut count: usize = 0;
+        let mut bytes: usize = 0;
         for ext in &self.extensions {
             ext.validate()?;
-            bytes += ext.schema.len() + ext.version.len();
+            add_payload_budget(&mut bytes, ext.schema.len())?;
+            add_payload_budget(&mut bytes, ext.version.len())?;
             ext.data.validate_inner(1, &mut count, &mut bytes)?;
         }
         Ok(())

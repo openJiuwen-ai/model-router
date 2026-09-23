@@ -20,7 +20,7 @@ pub mod algorithm {
 /// 旧版自演进模块路径的兼容导出。新代码应从 crate 根导入契约。
 pub mod evolving {
     #[doc(hidden)]
-    pub use crate::evolving_provider as evolving_provider;
+    pub use crate::evolving_provider;
     pub use crate::evolving_provider::{Artifact, EvolvingProvider, TrainingBatch};
     pub use openjiuwen_protocol::TrainingPrompt;
 

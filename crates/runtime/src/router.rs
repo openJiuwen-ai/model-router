@@ -33,15 +33,29 @@ pub struct Router {
 }
 
 impl Router {
+    /// 从配置文件路径装配路由实例。
+    ///
+    /// # Errors
+    ///
+    /// 文件无法读取、TOML 无法解析，或 profile 中的算法 / state 无法装配时返回 [`RouterError`]。
     pub fn from_config(path: impl AsRef<Path>) -> Result<Self, RouterError> {
         Self::from_profile(RouterProfile::from_path(path)?)
     }
 
+    /// 从 TOML 文本装配路由实例。
+    ///
+    /// # Errors
+    ///
+    /// TOML 无法解析，或 profile 中的算法 / state 无法装配时返回 [`RouterError`]。
     pub fn from_toml(text: &str) -> Result<Self, RouterError> {
         Self::from_profile(RouterProfile::from_toml(text)?)
     }
 
-    /// 从配置文件创建路由实例。返回的是 Result<Router, RouterError> 类型。
+    /// 从已解析的 profile 装配路由实例。
+    ///
+    /// # Errors
+    ///
+    /// 算法名未知或未启用、state 后端未知，或 remote state 缺少 endpoint 时返回 [`RouterError`]。
     pub fn from_profile(profile: RouterProfile) -> Result<Self, RouterError> {
         let algorithm = registry::create_algorithm(&profile.algorithm)?;
         let state = Self::state_from_profile(&profile)?;
@@ -53,6 +67,10 @@ impl Router {
     }
 
     /// 按 profile 装配 state 槽。供 PyO3 在注入 Python `StateProvider` 前复用。
+    ///
+    /// # Errors
+    ///
+    /// state 后端未知，或 `remote` 后端缺少 endpoint 时返回 [`RouterError`]。
     pub fn state_from_profile(
         profile: &RouterProfile,
     ) -> Result<Arc<dyn StateProvider>, RouterError> {
@@ -94,7 +112,10 @@ impl Router {
     }
 
     /// 驱动决策循环。`hint` 携带 cache_affinity 等每请求输入。
-    /// 返回的是 Result<Decision, RouterError> 类型。
+    ///
+    /// # Errors
+    ///
+    /// 过滤排除项后没有可用目标，或算法决策失败时返回 [`RouterError`]。
     pub fn route(&self, req: &RouteRequest, hint: &RouteHint) -> Result<Decision, RouterError> {
         let seed = self.seed.fetch_add(1, Ordering::Relaxed);
         // 先于读 state 生成：state 的 `query` 需要它来关联之后带同一 id 回来的
@@ -131,6 +152,10 @@ impl Router {
     ///
     /// 校验不过的反馈**不写入 state**，并以 [`FeedbackError`] 返回原因。
     /// 这是跨语言一致的唯一校验入口：Python 门面同样走这里。
+    ///
+    /// # Errors
+    ///
+    /// 反馈协议版本、扩展载荷或其他字段不合规时返回 [`FeedbackError`]，且不会写入 state。
     pub fn try_report(&self, feedback: Feedback) -> Result<(), FeedbackError> {
         feedback.validate()?;
         self.state.report(feedback);
@@ -285,7 +310,9 @@ models = ["alpha"]
     /// 没有检索意图时不调 `query`，id 照常生成。
     #[test]
     fn query_receives_the_route_id_the_decision_carries() {
-        use openjiuwen_protocol::{RoutingKey, StateQuery, StateQueryError, StateSnapshot, StateView};
+        use openjiuwen_protocol::{
+            RoutingKey, StateQuery, StateQueryError, StateSnapshot, StateView,
+        };
         use std::sync::Mutex;
 
         struct Recorder(Mutex<Vec<Option<String>>>);
@@ -293,7 +320,11 @@ models = ["alpha"]
             fn snapshot(&self, _key: &RoutingKey) -> StateView {
                 StateView::empty()
             }
-            fn query(&self, _key: &RoutingKey, query: &StateQuery) -> Result<StateSnapshot, StateQueryError> {
+            fn query(
+                &self,
+                _key: &RoutingKey,
+                query: &StateQuery,
+            ) -> Result<StateSnapshot, StateQueryError> {
                 self.0.lock().unwrap().push(query.route_id.clone());
                 Ok(StateSnapshot::empty())
             }
@@ -313,13 +344,20 @@ models = ["alpha"]
             ..RouteHint::default()
         };
         let decision = router.route(&req, &hint).expect("route");
-        assert_eq!(recorder.0.lock().unwrap().as_slice(), &[decision.route_id.clone()]);
+        assert_eq!(
+            recorder.0.lock().unwrap().as_slice(),
+            &[decision.route_id.clone()]
+        );
         assert_ne!(decision.route_id.as_deref(), Some("host-filled"));
 
         let plain = router.route(&req, &RouteHint::default()).expect("route");
         assert!(plain.route_id.is_some());
         assert_ne!(plain.route_id, decision.route_id);
-        assert_eq!(recorder.0.lock().unwrap().len(), 1, "no state_query → query not called");
+        assert_eq!(
+            recorder.0.lock().unwrap().len(),
+            1,
+            "no state_query → query not called"
+        );
     }
 
     #[test]

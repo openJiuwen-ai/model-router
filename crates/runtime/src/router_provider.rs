@@ -10,6 +10,10 @@ use openjiuwen_protocol::{
 /// 北向门面契约。`Send + Sync`，对象安全，应用可持有 `&dyn RouterProvider`。
 pub trait RouterProvider: Send + Sync {
     /// 单步决策。`hint` 无额外信息时传 [`RouteHint::default`]。
+    ///
+    /// # Errors
+    ///
+    /// 没有可用目标或决策失败时返回 [`RouterError`]。
     fn route(
         &self,
         request: &RouteRequest,
@@ -19,6 +23,10 @@ pub trait RouterProvider: Send + Sync {
     /// 校验后吸收调用结果；非法反馈不写入 state。
     ///
     /// 同步调用，不等待写回完成。实现方必须先校验再转发。
+    ///
+    /// # Errors
+    ///
+    /// 反馈校验失败时返回 [`FeedbackError`]，且不得写入 state。
     fn try_report(&self, feedback: Feedback) -> Result<(), FeedbackError>;
 
     /// 吸收调用结果。同步调用，不等待写回完成。

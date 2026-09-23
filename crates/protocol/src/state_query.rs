@@ -75,6 +75,10 @@ impl StateQuery {
     }
 
     /// 严格校验：文本长度、向量维度与有限性、`top_k` 范围、扩展载荷预算。
+    ///
+    /// # Errors
+    ///
+    /// 文本或向量超限、向量为空或含非有限数、`top_k` 非法，或扩展载荷不合规时返回 [`StateQueryError`]。
     pub fn validate(&self) -> Result<(), StateQueryError> {
         if let Some(text) = &self.text {
             if text.len() > QUERY_MAX_TEXT_BYTES {
@@ -100,11 +104,14 @@ impl StateQuery {
         if self.extensions.len() > MAX_EXTENSIONS {
             return Err(StateQueryError::Extension(FeedbackError::PayloadTooLarge));
         }
-        let mut count = 0;
-        let mut bytes = 0;
+        let mut count: usize = 0;
+        let mut bytes: usize = 0;
         for ext in &self.extensions {
             ext.validate().map_err(StateQueryError::Extension)?;
-            bytes += ext.schema.len() + ext.version.len();
+            crate::feedback::add_payload_budget(&mut bytes, ext.schema.len())
+                .map_err(StateQueryError::Extension)?;
+            crate::feedback::add_payload_budget(&mut bytes, ext.version.len())
+                .map_err(StateQueryError::Extension)?;
             ext.data
                 .validate_inner(1, &mut count, &mut bytes)
                 .map_err(StateQueryError::Extension)?;
@@ -167,12 +174,16 @@ impl StateSnapshot {
     /// 防御性校验：条数上限、分数有限、载荷预算。
     ///
     /// runtime 会在交给算法前调用；不合规的快照降级为仅视图，绝不阻断请求。
+    ///
+    /// # Errors
+    ///
+    /// 命中条数超限、分数非有限，或载荷不合规时返回 [`StateQueryError`]。
     pub fn validate(&self) -> Result<(), StateQueryError> {
         if self.retrieved.len() > QUERY_MAX_RETRIEVED {
             return Err(StateQueryError::TooManyRetrieved);
         }
-        let mut count = 0;
-        let mut bytes = 0;
+        let mut count: usize = 0;
+        let mut bytes: usize = 0;
         for item in &self.retrieved {
             if !item.score.is_finite() {
                 return Err(StateQueryError::NonFiniteScore);
@@ -249,7 +260,9 @@ mod tests {
 
     #[test]
     fn text_and_vector_bounds() {
-        assert!(StateQuery::text("x".repeat(QUERY_MAX_TEXT_BYTES)).validate().is_ok());
+        assert!(StateQuery::text("x".repeat(QUERY_MAX_TEXT_BYTES))
+            .validate()
+            .is_ok());
         assert_eq!(
             StateQuery::text("x".repeat(QUERY_MAX_TEXT_BYTES + 1)).validate(),
             Err(StateQueryError::TextTooLarge)
@@ -271,7 +284,9 @@ mod tests {
             Err(StateQueryError::InvalidTopK)
         );
         assert_eq!(
-            StateQuery::text("q").with_top_k(QUERY_MAX_TOP_K + 1).validate(),
+            StateQuery::text("q")
+                .with_top_k(QUERY_MAX_TOP_K + 1)
+                .validate(),
             Err(StateQueryError::InvalidTopK)
         );
         assert!(StateQuery::vector(vec![0.0f32; QUERY_MAX_VECTOR_DIMS])
