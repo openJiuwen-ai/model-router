@@ -5,6 +5,10 @@ use openjiuwen_algorithms::AlgorithmProvider;
 use openjiuwen_protocol::RouterError;
 
 /// 按名称从示意算法池取出一个实例。未命中则报装配错误。
+///
+/// # Errors
+///
+/// 名称未知或对应算法未启用时返回 [`RouterError`]。
 pub fn create_algorithm(name: &str) -> Result<Box<dyn AlgorithmProvider>, RouterError> {
     match name {
         #[cfg(feature = "algo-passthrough")]

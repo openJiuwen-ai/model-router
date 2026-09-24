@@ -20,7 +20,7 @@ impl Decision {
             selected_model_id: selected_model_id.into(), // 选中目标的语义名
             reasoning: reasoning.into(),                 // 决策理由
             is_answer_call: true,                        // 默认应答
-            route_id: None,                           // 由 runtime 填充
+            route_id: None,                              // 由 runtime 填充
         }
     }
 }

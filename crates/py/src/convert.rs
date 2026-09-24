@@ -7,8 +7,8 @@ use pyo3::types::{PyDict, PyList, PyModule, PySequence, PyString, PyType};
 use openjiuwen_algorithms::RouteContext;
 use openjiuwen_protocol::{
     Extension, Message, Outcome, RequestMetadata, RetrievedItem, RouteHint, RouteRequest,
-    RouterError, RoutingKey, StateQuery, StateSnapshot, StateView, MAX_EXTENSIONS,
-    QUERY_MAX_RETRIEVED, ToolCall,
+    RouterError, RoutingKey, StateQuery, StateSnapshot, StateView, ToolCall, MAX_EXTENSIONS,
+    QUERY_MAX_RETRIEVED,
 };
 use openjiuwen_runtime::config::{RouterProfile, StateConfig, TargetsConfig};
 
@@ -400,14 +400,14 @@ fn extract_tool_calls(message: &Bound<'_, PyDict>) -> PyResult<Vec<ToolCall>> {
     let mut calls = Vec::new();
     for raw in raw_calls.try_iter()? {
         let raw = raw?;
-        let dict = raw.downcast::<PyDict>().map_err(|_| {
-            PyValueError::new_err("message.tool_calls items must be dictionaries")
-        })?;
+        let dict = raw
+            .downcast::<PyDict>()
+            .map_err(|_| PyValueError::new_err("message.tool_calls items must be dictionaries"))?;
         let function_value = dict.get_item("function")?;
         let function = match function_value.as_ref() {
-            Some(value) => value.downcast::<PyDict>().map_err(|_| {
-                PyValueError::new_err("tool_call.function must be a dictionary")
-            })?,
+            Some(value) => value
+                .downcast::<PyDict>()
+                .map_err(|_| PyValueError::new_err("tool_call.function must be a dictionary"))?,
             None => dict,
         };
         let name = dict_str(function, "name")?

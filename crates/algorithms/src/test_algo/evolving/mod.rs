@@ -7,7 +7,7 @@ pub mod mf;
 
 // 兼容旧版公开路径；契约定义仍位于 crate 根模块。
 #[doc(hidden)]
-pub use crate::evolving_provider as evolving_provider;
+pub use crate::evolving_provider;
 #[doc(hidden)]
 pub use crate::evolving_provider::{Artifact, EvolvingProvider, TrainingBatch};
 

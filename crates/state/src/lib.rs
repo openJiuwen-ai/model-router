@@ -13,7 +13,7 @@ pub use test_state::{MemoryState, RemoteState};
 
 /// 旧版状态模块路径的兼容导出。新代码应从 crate 根导入契约和实现。
 pub mod state {
-    pub use crate::state_provider as state_provider;
+    pub use crate::state_provider;
     pub use crate::state_provider::{CasConflict, StateProvider};
     pub use crate::test_state;
 }

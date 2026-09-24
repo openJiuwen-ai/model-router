@@ -71,10 +71,16 @@ mod tests {
         let key = RoutingKey::default();
         state.report(Feedback::ok(key.clone(), "m", 3));
         let query = StateQuery::text("hello").with_top_k(5);
-        let via_query = state.query(&key, &query).expect("default query must not fail");
+        let via_query = state
+            .query(&key, &query)
+            .expect("default query must not fail");
         assert_eq!(via_query.view, state.snapshot(&key));
         assert!(via_query.retrieved.is_empty());
     }
+}
+
+fn expiry(now: Instant, ttl: Duration) -> Instant {
+    now.checked_add(ttl).unwrap_or(now)
 }
 
 impl Default for MemoryState {
@@ -113,10 +119,10 @@ impl StateProvider for MemoryState {
         // 插入或更新 entry。
         let entry = map.entry(feedback.key.clone()).or_insert_with(|| Entry {
             view: StateView::empty(),
-            expires_at: now + self.ttl,
+            expires_at: expiry(now, self.ttl),
         });
         // 更新过期时间。
-        entry.expires_at = now + self.ttl;
+        entry.expires_at = expiry(now, self.ttl);
         // 更新样本计数。
         entry.view.stats.sample_count = entry.view.stats.sample_count.saturating_add(1);
         // 根据反馈结果更新 StateView。

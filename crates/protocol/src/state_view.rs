@@ -9,9 +9,9 @@ pub struct FeedbackStats {
 /// 路由前一次性读入的状态快照。丢失只降质，不阻塞。
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct StateView {
-    pub affinity: Option<String>,   // 亲和性提示
-    pub exclusions: Vec<String>,    // 排除列表
-    pub stats: FeedbackStats,       // 反馈统计
+    pub affinity: Option<String>, // 亲和性提示
+    pub exclusions: Vec<String>,  // 排除列表
+    pub stats: FeedbackStats,     // 反馈统计
 }
 
 impl StateView {

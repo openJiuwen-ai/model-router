@@ -37,7 +37,9 @@ impl StateProvider for PyStateAdapter {
                 Err(_) => return StateView::empty(),
             };
             match self.obj.bind(py).call_method1("snapshot", (py_key,)) {
-                Ok(result) => convert::extract_state_view(&result).unwrap_or_else(|_| StateView::empty()),
+                Ok(result) => {
+                    convert::extract_state_view(&result).unwrap_or_else(|_| StateView::empty())
+                }
                 Err(_) => StateView::empty(),
             }
         })
@@ -46,7 +48,11 @@ impl StateProvider for PyStateAdapter {
     /// Python 侧实现了 `query` 就走它，否则回退 `snapshot`。
     ///
     /// 旧版 Python StateProvider 无需改动：没有 `query` 属性时行为与之前完全一致。
-    fn query(&self, key: &RoutingKey, query: &StateQuery) -> Result<StateSnapshot, StateQueryError> {
+    fn query(
+        &self,
+        key: &RoutingKey,
+        query: &StateQuery,
+    ) -> Result<StateSnapshot, StateQueryError> {
         Python::with_gil(|py| {
             let obj = self.obj.bind(py);
             let has_query = obj.hasattr("query").unwrap_or(false);

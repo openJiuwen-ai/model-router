@@ -22,7 +22,8 @@ use crate::convert::{extract_hint, extract_request, profile_from_obj};
 use crate::error::to_py;
 use crate::types::{
     PyFeedback, PyFeedbackStats, PyMessage, PyModelSelection, PyRequestMetadata, PyRetrievedItem,
-    PyRouteContext, PyRouteHint, PyRouteRequest, PyRoutingKey, PyStateQuery, PyStateView, PyToolCall,
+    PyRouteContext, PyRouteHint, PyRouteRequest, PyRoutingKey, PyStateQuery, PyStateView,
+    PyToolCall,
 };
 
 struct PyKvCoordinator {
@@ -47,7 +48,7 @@ impl PyRouter {
     /// `from_config(path | dict, *, state=None)`。dict 便于配置中心注入。
     #[staticmethod]
     #[pyo3(signature = (config, *, state=None))] // config 是必填参数；state 是可选参数；* 表示 state 必须使用关键字传递；
-    // PyAny表示 config 是一个任意 Python 对象，在python中支持配置文件和字典两种形式；
+                                                 // PyAny表示 config 是一个任意 Python 对象，在python中支持配置文件和字典两种形式；
     fn from_config(config: Bound<'_, PyAny>, state: Option<Bound<'_, PyAny>>) -> PyResult<Self> {
         assemble(profile_from_obj(&config)?, state)
     }
