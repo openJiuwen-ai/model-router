@@ -1,78 +1,98 @@
-// SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
-// SPDX-License-Identifier: Apache-2.0
-
-//! Signal-only Stage Router adapted from Switchyard's rule-based implementation.
-//!
-//! The configured target order is `efficient`, then `capable`. The router keeps
-//! the deterministic signal rules and deliberately omits telemetry, request
-//! mutation, and the optional LLM-classifier fallback.
+use std::collections::VecDeque;
 
 use openjiuwen_protocol::{Decision, RouteRequest, RouterError, ToolCall};
 
 use crate::{AlgorithmProvider, RouteContext};
 
-const SOFT: f64 = 0.3;
-const HARD: f64 = 0.7;
-const CRITICAL: f64 = 1.0;
-const RECENT_WINDOW: usize = 3;
-const CONFIDENCE_THRESHOLD: f64 = 0.5;
-const STALL_MIN_TURN_DEPTH: usize = 8;
+const SOFT_FAILURE: f64 = 0.3;
+const HARD_FAILURE: f64 = 0.7;
+const CRITICAL_FAILURE: f64 = 1.0;
 const SCORE_GAIN: f64 = 5.0;
-const SIGNAL_UNIT: f64 = 0.10;
+const EVIDENCE_WEIGHT: f64 = 0.10;
 const COMPACTION_MARKER: &str = "session is being continued";
 
-const ERROR_PATTERNS: &[(f64, &[&str])] = &[
-    (
-        CRITICAL,
-        &["out of memory", "memoryerror", "cannot allocate memory"],
-    ),
-    (
-        CRITICAL,
-        &[
+#[derive(Clone, Copy)]
+struct StagePolicy {
+    history_window: usize,
+    confidence_floor: f64,
+    stall_depth: usize,
+}
+
+const DEFAULT_POLICY: StagePolicy = StagePolicy {
+    history_window: 3,
+    confidence_floor: 0.5,
+    stall_depth: 8,
+};
+
+struct FailureSignature {
+    weight: f64,
+    fragments: &'static [&'static str],
+}
+
+const FAILURE_SIGNATURES: &[FailureSignature] = &[
+    FailureSignature {
+        weight: CRITICAL_FAILURE,
+        fragments: &["out of memory", "memoryerror", "cannot allocate memory"],
+    },
+    FailureSignature {
+        weight: CRITICAL_FAILURE,
+        fragments: &[
             "connection refused",
             "connectionrefusederror",
             "econnrefused",
         ],
-    ),
-    (HARD, &["traceback (most recent call last)"]),
-    (
-        HARD,
-        &["modulenotfounderror:", "importerror:", "no module named "],
-    ),
-    (
-        HARD,
-        &["command not found", "not found\n", "/usr/bin/env: "],
-    ),
-    (HARD, &["assertionerror"]),
-    (HARD, &["valueerror:"]),
-    (HARD, &["syntaxerror:"]),
-    (
-        HARD,
-        &[
+    },
+    FailureSignature {
+        weight: HARD_FAILURE,
+        fragments: &["traceback (most recent call last)"],
+    },
+    FailureSignature {
+        weight: HARD_FAILURE,
+        fragments: &["modulenotfounderror:", "importerror:", "no module named "],
+    },
+    FailureSignature {
+        weight: HARD_FAILURE,
+        fragments: &["command not found", "not found\n", "/usr/bin/env: "],
+    },
+    FailureSignature {
+        weight: HARD_FAILURE,
+        fragments: &["assertionerror"],
+    },
+    FailureSignature {
+        weight: HARD_FAILURE,
+        fragments: &["valueerror:"],
+    },
+    FailureSignature {
+        weight: HARD_FAILURE,
+        fragments: &["syntaxerror:"],
+    },
+    FailureSignature {
+        weight: HARD_FAILURE,
+        fragments: &[
             "timed out",
             "timeouterror",
             "timeout expired",
             "deadline exceeded",
         ],
-    ),
-    (
-        HARD,
-        &[
+    },
+    FailureSignature {
+        weight: HARD_FAILURE,
+        fragments: &[
             "filenotfounderror:",
             "no such file or directory",
             "file does not exist",
         ],
-    ),
-    (
-        SOFT,
-        &[
+    },
+    FailureSignature {
+        weight: SOFT_FAILURE,
+        fragments: &[
             "exit code 1",
             "exit code 2",
             "exit status 1",
             "returned non-zero",
             "exited with code",
         ],
-    ),
+    },
 ];
 
 const EDIT_TOOLS: &[&str] = &[
@@ -156,56 +176,111 @@ impl AlgorithmProvider for StageRouter {
             ));
         };
 
-        let signals = extract_signals(request);
-        let dimensions = dimensions(&signals);
-        let (target, source, score, confidence) =
-            if signals.compacted || signals.severity >= CRITICAL {
-                (capable, "override", 0.0, 1.0)
-            } else if signals.tests_passed
-                && signals.recent_write_count + signals.recent_edit_count >= 1
-                && signals.severity <= 0.0
-            {
-                (efficient, "tests_passed", 0.0, 0.0)
-            } else {
-                let score = score(dimensions);
-                let confidence = score.abs();
-                if confidence >= CONFIDENCE_THRESHOLD {
-                    let target = if score > 0.0 { capable } else { efficient };
-                    (target, "dimensions", score, confidence)
-                } else {
-                    (efficient, "fall_open", score, confidence)
-                }
-            };
+        let snapshot = observe_history(request, DEFAULT_POLICY);
+        let assessment = assess_stage(&snapshot, DEFAULT_POLICY);
+        let selected = match assessment.tier {
+            ModelTier::Efficient => efficient,
+            ModelTier::Capable => capable,
+        };
 
         Ok(Decision::answer(
-            target,
-            format!("stage_router: source={source}, score={score:.3}, confidence={confidence:.3}"),
+            selected,
+            format!(
+                "stage_router: source={}, score={:.3}, confidence={:.3}",
+                assessment.basis.label(),
+                assessment.score,
+                assessment.confidence
+            ),
         ))
     }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
-struct ToolSignals {
-    severity: f64,
-    recent_edit_count: usize,
-    recent_write_count: usize,
-    recent_read_count: usize,
-    recent_plan_count: usize,
-    tests_passed: bool,
-    turn_depth: usize,
-    compacted: bool,
+struct ActivityCounts {
+    writes: usize,
+    edits: usize,
+    reads: usize,
+    plans: usize,
 }
 
-#[derive(Clone, Copy)]
-struct Dimensions {
-    severity: f64,
-    spinning: f64,
-    exploring: f64,
-    production_intensity: f64,
+impl ActivityCounts {
+    fn record(&mut self, operation: OperationKind) {
+        let counter = match operation {
+            OperationKind::Write => &mut self.writes,
+            OperationKind::Edit => &mut self.edits,
+            OperationKind::Read => &mut self.reads,
+            OperationKind::Plan => &mut self.plans,
+            OperationKind::Other => return,
+        };
+        *counter = counter.saturating_add(1);
+    }
+
+    fn production(self) -> usize {
+        self.writes.saturating_add(self.edits)
+    }
+
+    fn total(self) -> usize {
+        self.production()
+            .saturating_add(self.reads)
+            .saturating_add(self.plans)
+    }
+
+    fn is_investigating(self) -> bool {
+        self.reads != 0 || self.plans != 0
+    }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ToolCategory {
+#[derive(Clone, Copy, Debug, Default)]
+struct HistorySnapshot {
+    failure_pressure: f64,
+    activity: ActivityCounts,
+    clean_test_run: bool,
+    conversation_depth: usize,
+    context_was_compacted: bool,
+}
+
+impl HistorySnapshot {
+    fn requires_capable_model(self) -> bool {
+        self.context_was_compacted || self.failure_pressure >= CRITICAL_FAILURE
+    }
+
+    fn represents_completed_work(self) -> bool {
+        self.clean_test_run && self.activity.production() != 0 && self.failure_pressure <= 0.0
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct EvidenceVector {
+    failure: f64,
+    stalled: f64,
+    investigation: f64,
+    delivery_ratio: f64,
+}
+
+impl EvidenceVector {
+    fn from_snapshot(snapshot: &HistorySnapshot, policy: StagePolicy) -> Self {
+        let activity = snapshot.activity;
+        let has_no_output = activity.production() == 0;
+        let is_deep = snapshot.conversation_depth >= policy.stall_depth;
+        let is_investigating = activity.is_investigating();
+
+        Self {
+            failure: snapshot.failure_pressure,
+            stalled: bool_as_score(is_deep && has_no_output && !is_investigating),
+            investigation: bool_as_score(is_deep && has_no_output && is_investigating),
+            delivery_ratio: ratio(activity.production(), activity.total()),
+        }
+    }
+
+    fn signed_score(self) -> f64 {
+        let combined =
+            self.failure / HARD_FAILURE + self.stalled + self.investigation - self.delivery_ratio;
+        (SCORE_GAIN * EVIDENCE_WEIGHT * combined).tanh()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OperationKind {
     Write,
     Edit,
     Read,
@@ -213,116 +288,182 @@ enum ToolCategory {
     Other,
 }
 
-fn extract_signals(request: &RouteRequest) -> ToolSignals {
-    let mut tool_results = Vec::new();
-    let mut calls = Vec::new();
-    let mut turn_depth = 0;
-    let mut compacted = false;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ModelTier {
+    Efficient,
+    Capable,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DecisionBasis {
+    SafetyOverride,
+    VerifiedProgress,
+    EvidenceScore,
+    DefaultTier,
+}
+
+impl DecisionBasis {
+    fn label(self) -> &'static str {
+        match self {
+            Self::SafetyOverride => "override",
+            Self::VerifiedProgress => "tests_passed",
+            Self::EvidenceScore => "dimensions",
+            Self::DefaultTier => "fall_open",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct StageAssessment {
+    tier: ModelTier,
+    basis: DecisionBasis,
+    score: f64,
+    confidence: f64,
+}
+
+fn assess_stage(snapshot: &HistorySnapshot, policy: StagePolicy) -> StageAssessment {
+    if snapshot.requires_capable_model() {
+        return StageAssessment {
+            tier: ModelTier::Capable,
+            basis: DecisionBasis::SafetyOverride,
+            score: 0.0,
+            confidence: 1.0,
+        };
+    }
+    if snapshot.represents_completed_work() {
+        return StageAssessment {
+            tier: ModelTier::Efficient,
+            basis: DecisionBasis::VerifiedProgress,
+            score: 0.0,
+            confidence: 0.0,
+        };
+    }
+
+    let score = EvidenceVector::from_snapshot(snapshot, policy).signed_score();
+    let confidence = score.abs();
+    let (tier, basis) = if confidence >= policy.confidence_floor {
+        (
+            if score > 0.0 {
+                ModelTier::Capable
+            } else {
+                ModelTier::Efficient
+            },
+            DecisionBasis::EvidenceScore,
+        )
+    } else {
+        (ModelTier::Efficient, DecisionBasis::DefaultTier)
+    };
+
+    StageAssessment {
+        tier,
+        basis,
+        score,
+        confidence,
+    }
+}
+
+fn observe_history(request: &RouteRequest, policy: StagePolicy) -> HistorySnapshot {
+    let mut recent_results = VecDeque::with_capacity(policy.history_window.max(1));
+    let mut recent_operations = VecDeque::with_capacity(policy.history_window);
+    let mut conversation_depth: usize = 0;
+    let mut context_was_compacted = false;
 
     for message in &request.messages {
         let role = message.role.to_ascii_lowercase();
         if role != "system" && role != "developer" {
-            turn_depth += 1;
-            compacted |= message
+            conversation_depth = conversation_depth.saturating_add(1);
+            context_was_compacted |= message
                 .content
                 .to_ascii_lowercase()
                 .contains(COMPACTION_MARKER);
         }
         if role == "tool" && !message.content.is_empty() {
-            tool_results.push(message.content.as_str());
+            retain_latest(
+                &mut recent_results,
+                message.content.as_str(),
+                policy.history_window.max(1),
+            );
         }
         if role == "assistant" {
-            calls.extend(message.tool_calls.iter());
+            for call in &message.tool_calls {
+                retain_latest(
+                    &mut recent_operations,
+                    operation_kind(call),
+                    policy.history_window,
+                );
+            }
         }
     }
 
-    let severity = tool_results
+    let failure_pressure = recent_results
         .iter()
-        .rev()
-        .take(RECENT_WINDOW.max(1))
-        .map(|text| classify_severity(text))
+        .map(|result| failure_weight(result))
         .fold(0.0, f64::max);
-    let recent_categories: Vec<_> = calls
+    let clean_test_run = recent_results
         .iter()
-        .rev()
-        .take(RECENT_WINDOW)
-        .map(|call| classify_tool_call(call))
-        .collect();
+        .any(|result| is_clean_test_result(result));
+    let mut activity = ActivityCounts::default();
+    for operation in recent_operations {
+        activity.record(operation);
+    }
 
-    ToolSignals {
-        severity,
-        recent_edit_count: count(&recent_categories, ToolCategory::Edit),
-        recent_write_count: count(&recent_categories, ToolCategory::Write),
-        recent_read_count: count(&recent_categories, ToolCategory::Read),
-        recent_plan_count: count(&recent_categories, ToolCategory::Plan),
-        tests_passed: detect_tests_passed(&tool_results),
-        turn_depth,
-        compacted,
+    HistorySnapshot {
+        failure_pressure,
+        activity,
+        clean_test_run,
+        conversation_depth,
+        context_was_compacted,
     }
 }
 
-fn count(categories: &[ToolCategory], expected: ToolCategory) -> usize {
-    categories.iter().filter(|item| **item == expected).count()
+fn retain_latest<T>(items: &mut VecDeque<T>, item: T, limit: usize) {
+    if limit == 0 {
+        return;
+    }
+    if items.len() == limit {
+        items.pop_front();
+    }
+    items.push_back(item);
 }
 
-fn dimensions(signals: &ToolSignals) -> Dimensions {
-    let recent_ops = signals.recent_write_count
-        + signals.recent_edit_count
-        + signals.recent_read_count
-        + signals.recent_plan_count;
-    let no_production = signals.recent_write_count == 0 && signals.recent_edit_count == 0;
-    let investigating = signals.recent_read_count >= 1 || signals.recent_plan_count >= 1;
-    let deep_enough = signals.turn_depth >= STALL_MIN_TURN_DEPTH;
-
-    Dimensions {
-        severity: signals.severity,
-        spinning: if deep_enough && no_production && !investigating {
-            1.0
-        } else {
-            0.0
-        },
-        exploring: if deep_enough && no_production && investigating {
-            1.0
-        } else {
-            0.0
-        },
-        production_intensity: if recent_ops == 0 {
-            0.0
-        } else {
-            (signals.recent_write_count + signals.recent_edit_count) as f64 / recent_ops as f64
-        },
+fn bool_as_score(value: bool) -> f64 {
+    if value {
+        1.0
+    } else {
+        0.0
     }
 }
 
-fn score(dimensions: Dimensions) -> f64 {
-    let raw = SIGNAL_UNIT
-        * (dimensions.severity / HARD + dimensions.spinning + dimensions.exploring
-            - dimensions.production_intensity);
-    (SCORE_GAIN * raw).tanh()
+fn ratio(numerator: usize, denominator: usize) -> f64 {
+    if denominator == 0 {
+        0.0
+    } else {
+        numerator as f64 / denominator as f64
+    }
 }
 
-fn classify_severity(text: &str) -> f64 {
-    let lower = text.to_ascii_lowercase();
-    ERROR_PATTERNS
+fn failure_weight(text: &str) -> f64 {
+    let normalized = text.to_ascii_lowercase();
+    FAILURE_SIGNATURES
         .iter()
-        .filter(|(_, patterns)| patterns.iter().any(|pattern| lower.contains(pattern)))
-        .map(|(severity, _)| *severity)
+        .filter(|signature| contains_any(&normalized, signature.fragments))
+        .map(|signature| signature.weight)
         .fold(0.0, f64::max)
 }
 
-fn classify_tool_call(call: &ToolCall) -> ToolCategory {
+fn operation_kind(call: &ToolCall) -> OperationKind {
     let name = call.name.to_ascii_lowercase();
     if WRITE_TOOLS.contains(&name.as_str()) {
-        return ToolCategory::Write;
+        return OperationKind::Write;
     }
     if EDIT_TOOLS.contains(&name.as_str()) {
-        return ToolCategory::Edit;
+        return OperationKind::Edit;
     }
     if READ_TOOLS.contains(&name.as_str()) {
-        return ToolCategory::Read;
+        return OperationKind::Read;
     }
     if PLAN_TOOLS.contains(&name.as_str()) {
-        return ToolCategory::Plan;
+        return OperationKind::Plan;
     }
     if SHELL_TOOLS.contains(&name.as_str()) {
         let command = call
@@ -330,59 +471,64 @@ fn classify_tool_call(call: &ToolCall) -> ToolCategory {
             .as_deref()
             .unwrap_or_default()
             .to_ascii_lowercase();
-        if SHELL_WRITE.iter().any(|pattern| command.contains(pattern)) {
-            return ToolCategory::Write;
-        }
-        if SHELL_EDIT.iter().any(|pattern| command.contains(pattern)) {
-            return ToolCategory::Edit;
-        }
-        if SHELL_READ.iter().any(|pattern| command.contains(pattern)) {
-            return ToolCategory::Read;
+        for (patterns, kind) in [
+            (SHELL_WRITE, OperationKind::Write),
+            (SHELL_EDIT, OperationKind::Edit),
+            (SHELL_READ, OperationKind::Read),
+        ] {
+            if contains_any(&command, patterns) {
+                return kind;
+            }
         }
     }
-    ToolCategory::Other
+    OperationKind::Other
 }
 
-fn detect_tests_passed(tool_results: &[&str]) -> bool {
-    tool_results
-        .iter()
-        .rev()
-        .take(RECENT_WINDOW.max(1))
-        .any(|text| {
-            let lower = text.to_ascii_lowercase();
-            TEST_PASS_PHRASES
-                .iter()
-                .any(|phrase| lower.contains(phrase))
-                && !TEST_FAILURE_LITERAL
-                    .iter()
-                    .any(|phrase| lower.contains(phrase))
-                && !has_nonzero_failure_count(&lower)
-        })
+fn contains_any(text: &str, candidates: &[&str]) -> bool {
+    candidates.iter().any(|candidate| text.contains(candidate))
 }
 
-fn has_nonzero_failure_count(text: &str) -> bool {
+fn is_clean_test_result(text: &str) -> bool {
+    let normalized = text.to_ascii_lowercase();
+    contains_any(&normalized, TEST_PASS_PHRASES)
+        && !contains_any(&normalized, TEST_FAILURE_LITERAL)
+        && !has_counted_failure(&normalized)
+}
+
+fn has_counted_failure(text: &str) -> bool {
     NUMERIC_FAILURE_KEYWORDS.iter().any(|keyword| {
-        text.match_indices(keyword).any(|(start, _)| {
-            let end = start + keyword.len();
-            if text[end..]
+        text.match_indices(keyword).any(|(keyword_start, _)| {
+            let Some(keyword_end) = keyword_start.checked_add(keyword.len()) else {
+                return false;
+            };
+            if text[keyword_end..]
                 .chars()
                 .next()
                 .is_some_and(char::is_alphanumeric)
             {
                 return false;
             }
-            let digits: String = text[..start]
-                .trim_end()
-                .chars()
-                .rev()
-                .take_while(char::is_ascii_digit)
-                .collect::<String>()
-                .chars()
-                .rev()
-                .collect();
-            digits.parse::<u64>().is_ok_and(|count| count != 0)
+            count_immediately_before(text, keyword_start).is_some_and(|count| count != 0)
         })
     })
+}
+
+fn count_immediately_before(text: &str, boundary: usize) -> Option<u64> {
+    let digits_reversed: String = text[..boundary]
+        .trim_end()
+        .chars()
+        .rev()
+        .take_while(char::is_ascii_digit)
+        .collect();
+    if digits_reversed.is_empty() {
+        return None;
+    }
+    digits_reversed
+        .chars()
+        .rev()
+        .collect::<String>()
+        .parse()
+        .ok()
 }
 
 #[cfg(test)]
@@ -449,6 +595,16 @@ mod tests {
     }
 
     #[test]
+    fn context_compaction_overrides_to_capable() {
+        let decision = route(vec![message(
+            "user",
+            "This session is being continued from an earlier context.",
+        )]);
+        assert_eq!(decision.selected_model_id, "capable");
+        assert!(decision.reasoning.contains("source=override"));
+    }
+
+    #[test]
     fn correlated_error_and_exploration_route_to_capable() {
         let mut messages = vec![message("system", "instructions")];
         messages.extend((0..8).map(|index| message("user", &format!("turn {index}"))));
@@ -479,6 +635,47 @@ mod tests {
             message("tool", "2 failed, 5 passed"),
         ]);
         assert!(decision.reasoning.contains("source=fall_open"));
+    }
+
+    #[test]
+    fn zero_failures_still_count_as_a_clean_test_run() {
+        assert!(is_clean_test_result("test result: ok. 8 passed; 0 failed"));
+    }
+
+    #[test]
+    fn history_observer_keeps_only_the_configured_operation_window() {
+        let request = RouteRequest {
+            messages: vec![
+                tool_call("Read", None),
+                tool_call("Edit", None),
+                tool_call("Write", None),
+                tool_call("TodoWrite", None),
+            ],
+            ..RouteRequest::default()
+        };
+
+        let snapshot = observe_history(&request, DEFAULT_POLICY);
+        assert_eq!(snapshot.activity.reads, 0);
+        assert_eq!(snapshot.activity.edits, 1);
+        assert_eq!(snapshot.activity.writes, 1);
+        assert_eq!(snapshot.activity.plans, 1);
+    }
+
+    #[test]
+    fn system_and_developer_messages_do_not_inflate_depth() {
+        let request = RouteRequest {
+            messages: vec![
+                message("system", "system"),
+                message("developer", "developer"),
+                message("user", "task"),
+            ],
+            ..RouteRequest::default()
+        };
+
+        assert_eq!(
+            observe_history(&request, DEFAULT_POLICY).conversation_depth,
+            1
+        );
     }
 
     #[test]
