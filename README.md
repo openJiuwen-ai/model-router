@@ -1,82 +1,86 @@
 # openjiuwen-router
 
-## 简介
+[中文](README.zh.md)
 
-`openjiuwen-router` 是 openJiuwen 的模型路由内核：根据请求与状态快照选出一个模型。项目以 Rust 为核心，通过 Cargo workspace 分层实现协议、状态、算法和运行时，并预留 Python（PyO3 / maturin）门面，方便端侧 crate 依赖与云侧 wheel 复用同一套决策逻辑。
+## Overview
 
-宿主（agent / 网关 / 端侧应用）调用 `Router::route` 拿到 `Decision`，自己去调选中的模型，再把结果 `report` 回来。算法是纯函数——同样的 `(request, ctx)` 必须给出同样的决策；跨请求记忆全部外置到 state。
+`openjiuwen-router` is the model-routing kernel for openJiuwen: it picks one model from the request and a state snapshot. The core is Rust, split across a Cargo workspace into protocol, state, algorithms, and runtime, with a Python facade (PyO3 / maturin) so an edge crate and a cloud wheel share the same decision logic.
 
-核心能力包括：
+The host (agent, gateway, or edge app) calls `Router::route`, invokes the selected model itself, then `report`s the outcome. Algorithms are pure functions: the same `(request, ctx)` must yield the same decision. Anything remembered across requests lives in state.
 
-- `Router` 门面：`from_config` / `route` / `report`；北向契约 `RouterProvider` 在 runtime；
-- 可插拔算法槽（`AlgorithmProvider`）与状态槽（`StateProvider`），运行期各生效一个；
-- 协议层类型：`RouteRequest`、`Decision`、`ModelSelection`、`Feedback`、`StateView`；
-- 端云两套 TOML profile（进程内 state / 远程 state 客户端）；
-- 面向 Python 的 PyO3 扩展与内置 Python 算法包（骨架）。
+Core capabilities:
 
-架构与插件接入指南见 [`docs/zh/architecture.md`](docs/zh/architecture.md)（[English](docs/en/architecture.md)）。当前仓库是按蓝图搭起来的 workspace 骨架：目录、契约、装配和一条可跑的 ReAct 验证路径已经对齐；加权算法、远程 state gRPC、完整 PyO3 绑定仍是桩。
+- `Router` facade: `from_config` / `route` / `report`. The northbound contract `RouterProvider` lives in runtime.
+- One pluggable algorithm slot (`AlgorithmProvider`) and one state slot (`StateProvider`), each active at runtime.
+- Protocol types: `RouteRequest`, `Decision`, `ModelSelection`, `Feedback`, `StateView`.
+- Two TOML profiles for edge and cloud (in-process state / remote state client).
+- A PyO3 extension and bundled Python algorithm packages (skeleton).
 
-## 为什么选择这套内核
+Architecture and plugin guide: [`docs/en/architecture.md`](docs/en/architecture.md) ([中文](docs/zh/architecture.md)). This repository is the workspace skeleton from the blueprint: layout, contracts, assembly, and one runnable ReAct path are in place. Weighted algorithms, remote state gRPC, and the full PyO3 binding are still stubs.
 
-- **决策与执行分离**：算法只返回 `selected_model_id` 与 `reasoning`，模型调用由宿主履行，路由器不会成为流量瓶颈。
-- **纯函数可复用**：算法不调用被选中的目标模型、不持有可变状态，端云、Rust / Python 宿主共用同一契约。
-- **单槽可插拔**：一个路由实例运行期只跑一个算法、一套 state；候选来自注册表，装配期选定。
-- **状态是 hint**：丢失只降质为冷路由。远程实现硬超时返回空视图，而不是让请求失败。
-- **一套内核、两种形态**：端云差异收敛在 TOML profile，不在业务代码里分叉。
-- **可嵌入**：Rust 宿主静态链接 `openjiuwen-runtime`（`Router` / `RouterProvider`）。云侧可再经 PyO3 导出为 Python 扩展。
+## Why this kernel
 
-## 仓库结构
+- **Decision and execution stay apart.** An algorithm returns only `selected_model_id` and `reasoning`. The host performs the model call, so the router is not on the traffic path.
+- **Pure functions travel.** Algorithms do not call the selected target and do not hold mutable state. Edge, cloud, Rust, and Python hosts share one contract.
+- **One slot, swapped at assembly.** A router instance runs one algorithm and one state implementation. Candidates come from the registry; the profile picks them.
+- **State is a hint.** Losing it only degrades to a cold route. A remote implementation that hits its deadline returns an empty view instead of failing the request.
+- **One kernel, two shapes.** Edge/cloud differences stay in the TOML profile, not in forked business code.
+- **Embeddable.** A Rust host links `openjiuwen-runtime` (`Router` / `RouterProvider`). The cloud side can re-export that through PyO3.
+
+## Repository layout
 
 ```text
 model-router/
+├── README.md                       # English
+├── README.zh.md                    # Chinese
 ├── Cargo.toml                      # workspace
-├── pyproject.toml                  # maturin：云侧 Python wheel
+├── pyproject.toml                  # maturin: cloud-side Python wheel
 ├── crates/
-│   ├── protocol/                   # L1 协议层（零依赖：请求 / 决策 / 反馈 / 错误）
-│   ├── state/                      # L2 状态：StateProvider trait + memory / remote
-│   ├── algorithms/                 # L3 算法：AlgorithmProvider trait + 内置实现（feature 门控）
-│   ├── runtime/                    # L4 装配与运行：Router 门面
-│   └── py/                         # L5 PyO3 绑定（cdylib `_openjiuwen`）
+│   ├── protocol/                   # L1 protocol (zero deps: request / decision / feedback / error)
+│   ├── state/                      # L2 state: StateProvider trait + memory / remote
+│   ├── algorithms/                 # L3 algorithms: AlgorithmProvider trait + built-ins (feature-gated)
+│   ├── runtime/                    # L4 assembly and runtime: Router facade
+│   └── py/                         # L5 PyO3 binding (cdylib `_openjiuwen`)
 ├── python/
-│   ├── openjiuwen/                 # 云侧 Python 门面、算法契约、随包算法
-│   │   ├── x_router/                # 按请求复杂度分档选模型的算法
-│   │   ├── test_algo/              # 随包算法示例（discover 自动登记）
-│   │   └── test_algo2/             # 同上，另一个示例
-│   └── custom_test_algo/           # 包外自定义算法示例（import 时按 name 登记）
+│   ├── openjiuwen/                 # cloud Python facade, algorithm contract, bundled algorithms
+│   │   ├── x_router/               # route by request complexity
+│   │   ├── test_algo/              # bundled algorithm sample (discover registers it)
+│   │   └── test_algo2/             # another bundled sample
+│   └── custom_test_algo/           # out-of-package algorithm sample (registers by name on import)
 ├── config/
-│   ├── edge.toml                   # 端侧：memory 进程内
-│   ├── cloud.toml                  # 云侧：remote state
-│   └── x-router-example.toml        # x-router：档位映射 + 分类器
+│   ├── edge.toml                   # edge: in-process memory
+│   ├── cloud.toml                  # cloud: remote state
+│   └── x-router-example.toml       # x-router: tier map + classifier
 ├── examples/
-│   ├── python_integration.py       # Python 宿主集成示例（maturin develop 后可运行）
-│   ├── x_router_cli.py              # x-router 命令行驱动（看一份 profile 会怎么路由）
-│   └── rust_integration/           # Rust 宿主集成示例（独立 mini crate，cargo run）
+│   ├── python_integration.py       # Python host sample (run after maturin develop)
+│   ├── x_router_cli.py             # x-router CLI (see how a profile routes)
+│   └── rust_integration/           # Rust host sample (standalone mini crate, cargo run)
 ├── docs/
-│   ├── zh/architecture.md          # 架构与插件接入指南（中文）
-│   └── en/architecture.md          # Architecture and plugin guide (English)
+│   ├── zh/architecture.md          # architecture and plugin guide (Chinese)
+│   └── en/architecture.md          # architecture and plugin guide (English)
 └── tests/
-    ├── react_agent.rs              # 最小 ReAct 宿主，验证路由主路径
-    ├── react_agent.py              # 同一剧本的 Python 宿主版
-    └── test_package.py             # Python 包布局冒烟
+    ├── react_agent.rs              # minimal ReAct host, checks the routing path
+    ├── react_agent.py              # the same script as a Python host
+    └── test_package.py             # Python package layout smoke test
 ```
 
-## 快速开始
+## Quick start
 
-### 环境要求
+### Requirements
 
-- Rust `stable`（本仓库在 `x86_64-pc-windows-gnu` 上验证过）；
-- Python 3.8 或更高版本（构建 Python 扩展时使用）；
-- `maturin >= 1.7`（构建 Python 扩展）；
-- Windows / Linux / macOS。Windows GNU 工具链若 PATH 上是 LLVM-MinGW（缺 `libgcc`），仓库已在 `.cargo/config.toml` 指定 rustup 自带链接器：
+- Rust `stable` (verified on `x86_64-pc-windows-gnu`).
+- Python 3.8 or newer, when building the Python extension.
+- `maturin >= 1.7`, when building the Python extension.
+- Windows, Linux, or macOS. If the Windows GNU toolchain on `PATH` is LLVM-MinGW (no `libgcc`), `.cargo/config.toml` already points at the rustup linker:
 
 ```toml
 [target.x86_64-pc-windows-gnu]
 rustflags = ["-C", "link-self-contained=yes"]
 ```
 
-工具链目录与 rust-analyzer 环境变量与本机 `rust_demo_mod_04` 对齐（`RUSTUP_HOME` / `CARGO_HOME` 见 `.vscode/settings.json`）。
+Toolchain directories and rust-analyzer environment variables match the local `rust_demo_mod_04` setup (`RUSTUP_HOME` / `CARGO_HOME` in `.vscode/settings.json`).
 
-### 编译 Rust 核心
+### Build the Rust core
 
 ```bash
 git clone <repository-url>
@@ -85,53 +89,55 @@ cargo check
 cargo build
 ```
 
-`crates/py` 不在 workspace `default-members` 中，日常 `cargo build` / `cargo test` 只编 protocol、state、algorithms、runtime，不强制依赖 PyO3。
+`crates/py` is not in the workspace `default-members`. Day-to-day `cargo build` / `cargo test` compile protocol, state, algorithms, and runtime only, and do not require PyO3.
 
-只构建运行时（会连带编进其依赖）：
+Build just the runtime (its dependencies come along):
 
 ```bash
 cargo build -p openjiuwen-runtime
 ```
 
-### 构建 Python 扩展
+### Build the Python extension
 
-在已激活的 Python 虚拟环境中安装 `maturin`，然后执行：
+Install `maturin` in an active virtualenv, then:
 
 ```bash
 maturin develop
 ```
 
-安装后可以使用 `openjiuwen` 包。`Router.from_config` 接受路径或 dict；`route` / `report` 在 Python 侧是 async，同步内核仍在 Rust。跨边界类型是 `RouteRequest`、`ModelSelection`（别名 `Decision`）、`Feedback`。远程状态走 profile `state.backend = "remote"`；自定义状态用 Python `StateProvider`（`state=` / `register_state`）。`import openjiuwen` 会扫描并列子包中的随包 Python 算法并写入 Rust 槽；包外 `AlgorithmProvider` 子类在 import 时同样按 `name` 登记（必须实现 `decide`、能无参构造）。扩展未构建时，`AlgorithmProvider` 仍可单独导入。
+That installs the `openjiuwen` package. `Router.from_config` takes a path or a dict. On the Python side `route` / `report` are async; the kernel underneath is still synchronous Rust. Cross-boundary types are `RouteRequest`, `ModelSelection` (alias `Decision`), and `Feedback`. Remote state uses `state.backend = "remote"` in the profile. A custom state uses a Python `StateProvider` (`state=` / `register_state`). `import openjiuwen` scans sibling packages for bundled Python algorithms and installs them into the Rust slot. An out-of-package `AlgorithmProvider` subclass registers by `name` on import (it must implement `decide` and be constructible with no arguments). `AlgorithmProvider` can still be imported when the extension is not built.
 
 ```python
 import openjiuwen
 from openjiuwen import Feedback, Outcome, Router
 
 router = Router.from_config("config/cloud.toml")
-# 或 Router.from_config({"algorithm": "passthrough", "state": {"backend": "memory"}, "targets": {"models": ["a"]}})
+# or Router.from_config({"algorithm": "passthrough", "state": {"backend": "memory"}, "targets": {"models": ["a"]}})
 
 decision = await router.route({
     "messages": [{"role": "user", "content": "hi"}],
     "session_id": "s1",
     "agent_id": "host",
 })
-# 宿主自己调用 decision.selected_model_id
+# the host invokes decision.selected_model_id itself
 await router.report(Feedback.ok(decision, latency_ms=12, session_id="s1", agent_id="host"))
 ```
 
-Python 测试（`tests/test_package.py` 不需要扩展；`tests/test_native_router.py` 需要已安装的 `_openjiuwen`）：
+Python tests (`tests/test_package.py` does not need the extension; `tests/test_native_router.py` needs `_openjiuwen` installed):
 
 ```bash
 pytest tests/test_package.py tests/test_native_router.py
 ```
 
-## 样例 1：Rust 原生宿主
+## Example 1: native Rust host
 
-宿主静态链接 `openjiuwen-runtime`，进程内 `route` 取决策，自己调用模型后再 `report`。这是蓝图图 2 的形态（crate 直接依赖，无 PyO3）。
+The host links `openjiuwen-runtime`, calls `route` in-process, invokes the model itself, then `report`s. This is blueprint figure 2 (a direct crate dependency, no PyO3).
+
+`Feedback` is a concrete struct. `Feedback::ok` builds a successful result; copy `route_id` from the `Decision` so the report joins that route. `Overflow` / `Unavailable` live on `call.outcome` and drive the exclusion hint. `call = None` means the outcome is not known yet. Field notes: [`crates/protocol/README.md`](crates/protocol/README.md).
 
 ```rust
 use openjiuwen_runtime::{
-    Feedback, Outcome, RequestMetadata, RouteHint, RouteRequest, Router,
+    Feedback, RequestMetadata, RouteHint, RouteRequest, Router,
 };
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -147,34 +153,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let decision = router.route(&req, &RouteHint::default())?;
     println!(
-        "选中模型 {} ({})",
+        "selected {} ({})",
         decision.selected_model_id, decision.reasoning
     );
 
-    // 宿主自己调用 decision.selected_model_id 对应的模型后端
-    // 路由器不经手流量
+    // The host calls the backend for decision.selected_model_id.
+    // Model traffic does not pass through the router.
 
-    router.report(Feedback {
-        key: req.routing_key(),
-        selected_model_id: decision.selected_model_id.clone(),
-        outcome: Outcome::Ok, // Overflow / Unavailable 会写入排除 hint
-        latency_ms: 40,
-        cache_valid: None,
-    });
+    let mut feedback = Feedback::ok(req.routing_key(), &decision.selected_model_id, 40);
+    feedback.route_id = decision.route_id.clone();
+    router.report(feedback);
 
     Ok(())
 }
 ```
 
-装配也可以用 `Router::from_toml`（测试或配置中心下发文本时）。`from_profile` 会：
+`Router::from_toml` is the other assembly entry (tests, or a config service that ships the text). `from_profile`:
 
-1. 按 `algorithm` 名从注册表取出一个 `Box<dyn AlgorithmProvider>`（单槽）；
-2. 按 `state.backend` 选择 `MemoryState` 或 `RemoteState`（单槽）；
-3. 把 `targets.models` 收成目录，供后续 `decide` 剔除 exclusions。
+1. Looks up one `Box<dyn AlgorithmProvider>` by the `algorithm` name (single slot).
+2. Selects `MemoryState` or `RemoteState` from `state.backend` (single slot).
+3. Collects `targets.models` into the catalog that `decide` later filters with exclusions.
 
-名字写错或对应 `algo-*` feature 未编译，错误在启动时以 `RouterError::Config` 返回，不会拖到第一次 `route`。
+A bad name, or an `algo-*` feature that was not compiled in, returns `RouterError::Config` at startup rather than on the first `route`.
 
-端侧 profile 示例（`config/edge.toml`）：
+Edge profile (`config/edge.toml`):
 
 ```toml
 algorithm = "passthrough"
@@ -188,14 +190,14 @@ max_entries = 1024
 models = ["local-default"]
 ```
 
-云侧（`config/cloud.toml`）只把 `state.backend` 换成 `remote`，算法仍是同一份 Rust 实现。
+The cloud profile (`config/cloud.toml`) only switches `state.backend` to `remote`. The algorithm implementation stays the same Rust code.
 
-## 样例 2：最小 ReAct 宿主验证路由
+## Example 2: minimal ReAct host
 
-每一次模型调用前 `route`，调用后 `report`。模型由 mock 扮演，不发真实网络。循环是 Thought → Action → Observation → Final Answer。
+`route` before every model call, `report` after. The model is a mock; there is no network. The loop is Thought → Action → Observation → Final Answer.
 
-- Rust 宿主：[`tests/react_agent.rs`](tests/react_agent.rs)
-- Python 宿主（经 `python/openjiuwen` 调同一套 Rust `Router`）：[`tests/react_agent.py`](tests/react_agent.py)
+- Rust host: [`tests/react_agent.rs`](tests/react_agent.rs)
+- Python host (same Rust `Router`, through `python/openjiuwen`): [`tests/react_agent.py`](tests/react_agent.py)
 
 ```bash
 cargo test -p openjiuwen-runtime --test react_agent -- --nocapture
@@ -203,14 +205,14 @@ python tests/react_agent.py
 pytest tests/test_react_agent.py
 ```
 
-剧本：
+Script:
 
-1. Passthrough 首选 `fast-local` → mock 返回不可用 → `report(Unavailable)`；
-2. state 把该模型写入排除 hint → 再次 `route` 选中 `strong-cloud`；
-3. mock 给出 `Action: calc[21*2]`，宿主本地算出 42；
-4. 第二轮仍走 `strong-cloud`，得到 `Final Answer: 42`。
+1. Passthrough prefers `fast-local` → the mock is unavailable → `report(Unavailable)`.
+2. State records that model in the exclusion hint → the next `route` selects `strong-cloud`.
+3. The mock emits `Action: calc[21*2]`; the host computes 42 locally.
+4. The second turn still uses `strong-cloud` and gets `Final Answer: 42`.
 
-预期输出：
+Expected output:
 
 ```text
 ReAct: What is 21 * 2?
@@ -227,40 +229,40 @@ step 2
 test react_agent_routes_retries_and_answers ... ok
 ```
 
-这条路径覆盖蓝图图 2 的 ①–⑨。ReAct 循环本身属于宿主，不属于 Router。
+That path covers steps ①–⑨ of blueprint figure 2. The ReAct loop belongs to the host, not to `Router`.
 
-## 样例 3：最小宿主集成（examples/）
+## Example 3: minimal host integration (`examples/`)
 
-[`examples/`](examples/) 下是两个去掉 ReAct 循环、只保留路由闭环的最小示例，适合作为接入自己项目的起点：
+[`examples/`](examples/) drops the ReAct loop and keeps only the routing closed loop. Use it as the starting point for your own host:
 
-- Python：[`examples/python_integration.py`](examples/python_integration.py)，`maturin develop` 后运行 `python examples/python_integration.py`；
-- Rust：[`examples/rust_integration/`](examples/rust_integration/)，独立 mini crate，`cd examples/rust_integration && cargo run`。
+- Python: [`examples/python_integration.py`](examples/python_integration.py). After `maturin develop`, run `python examples/python_integration.py`.
+- Rust: [`examples/rust_integration/`](examples/rust_integration/), a standalone mini crate. `cd examples/rust_integration && cargo run`.
 
-两个示例演示同一条闭环：`route` 选模 → 宿主自己调模型（mock）→ `report` 回报 → 失败排除后自动换模。
+Both show the same loop: `route` picks a model → the host calls it (mock) → `report` → a failure excludes that model and the next route switches.
 
-## 主要模块
+## Modules
 
-### 协议层（`openjiuwen-protocol`）
+### Protocol (`openjiuwen-protocol`)
 
-零依赖底座。全部跨模块类型都在这里：`RouteRequest`、`Decision`、`ModelSelection`、`Feedback`、`StateView`、`RouterError`。其他 crate 只经协议层对话。
+Zero-dependency base. Every cross-crate type lives here: `RouteRequest`, `Decision`, `ModelSelection`, `Feedback`, `StateView`, `RouterError`. Other crates talk only through this layer. Types and samples: [`crates/protocol/README.md`](crates/protocol/README.md).
 
-### 状态层（`openjiuwen-state`）
+### State (`openjiuwen-state`)
 
-`StateProvider` 是唯一契约：`snapshot(key) -> StateView`、`report(feedback)`。契约定义在 `state_provider.rs`，测试/示意实现在 `test_state/`。端侧 `MemoryState`（TTL + 容量上界）；云侧 `RemoteState` 客户端（骨架阶段超时降级为空视图）。
+`StateProvider` is the only contract: `snapshot(key) -> StateView` and `report(feedback)`. The trait is in `state_provider.rs`; test and sample implementations are in `test_state/`. Edge `MemoryState` (TTL plus a capacity cap). Cloud `RemoteState` client (skeleton: a timeout degrades to an empty view).
 
-### 算法层（`openjiuwen-algorithms`）
+### Algorithms (`openjiuwen-algorithms`)
 
-`AlgorithmProvider::decide(request, ctx) -> Decision` 是算法团队的唯一接入点，定义在 `algorithm_provider.rs`；`EvolvingProvider::fit` 是在线自演进纯计算契约，定义在 `evolving_provider.rs`。测试/示意实现统一放在 `test_algo/`，并按 feature 门控；配置选 Python 版时关闭对应 feature，避免双份入产物。
+`AlgorithmProvider::decide(request, ctx) -> Decision` is the only entry point for algorithm authors (`algorithm_provider.rs`). `EvolvingProvider::fit` is the pure-compute contract for online evolution (`evolving_provider.rs`). Samples live in `test_algo/` and are feature-gated. Choosing the Python build turns the matching feature off so the same algorithm is not shipped twice.
 
-### 运行层（`openjiuwen-runtime`）
+### Runtime (`openjiuwen-runtime`)
 
-宿主只看 `Router`（实现 `RouterProvider`）。`from_config` 装配两个插件槽；`route` 驱动 snapshot → decide；`report` 转发 state。`RouterProvider` 与 `Router` 同在本层。`Trigger` / `TrainingJob` 类型已占位，尚未挂到装配路径。
+Hosts only see `Router`, which implements `RouterProvider`. `from_config` fills the two plugin slots. `route` runs snapshot → decide. `report` forwards to state. `RouterProvider` sits in this layer next to `Router`. `Trigger` / `TrainingJob` types exist but are not wired into assembly yet.
 
-### Python 门面（`crates/py` + `python/openjiuwen`）
+### Python facade (`crates/py` + `python/openjiuwen`)
 
-PyO3 扩展 `_openjiuwen` 与用户面包 `openjiuwen`。正向绑定：`from_config(path|dict)`、`route`、`report`、协议类型。反向绑定：`AlgorithmProvider` 子类定义时入槽，`register_state` 把 Python `StateProvider` 包装成 Rust trait。`discover` 扫描并列子包并在 `import openjiuwen` 时自动安装（demo 在 `test_algo/`）。
+The PyO3 extension `_openjiuwen` and the user package `openjiuwen`. Forward binding: `from_config(path|dict)`, `route`, `report`, and the protocol types. Reverse binding: an `AlgorithmProvider` subclass enters the slot when the class is defined; `register_state` wraps a Python `StateProvider` as the Rust trait. `discover` scans sibling packages and installs them on `import openjiuwen` (the demo is `test_algo/`).
 
-## 测试与检查
+## Tests and checks
 
 ```bash
 cargo fmt --all -- --check
@@ -269,40 +271,38 @@ cargo test
 cargo test -p openjiuwen-runtime --test react_agent -- --nocapture
 ```
 
-Python 测试：
+Python:
 
 ```bash
 pytest tests/test_package.py tests/test_native_router.py
 ```
 
-## 当前进度
+## Status
 
-已经能用：
+Working today:
 
-- 五层 crate 目录与公开契约（`RouterProvider` / `AlgorithmProvider` / `StateProvider` / `Router`）；
-- `from_config` 装配算法槽与 state 槽；
-- passthrough 决策、memory 排除 hint、ReAct 集成测试；
-- Python 门面：`RouteRequest` / `ModelSelection` / `Feedback` 绑定，以及 `AlgorithmProvider` 子类入槽 / `register_state` 反向包装。
+- Five crate layers and the public contracts (`RouterProvider` / `AlgorithmProvider` / `StateProvider` / `Router`).
+- `from_config` assembles the algorithm slot and the state slot.
+- Passthrough decisions, memory exclusion hints, and the ReAct integration test.
+- Python facade: `RouteRequest` / `ModelSelection` / `Feedback` bindings, plus reverse wrapping for `AlgorithmProvider` subclasses and `register_state`.
 
-仍是骨架 / 未接线：
+Still a skeleton, or not wired:
 
-- `weighted` / `signal` / `ensemble` / `rule_cascade` 目前退化为「选第一个」；
-- `RemoteState` 尚未真正发 gRPC（超时降级为空视图）；
-- `[[evolving]]` 能解析，但未挂到 `Trigger` / `TrainingJob`；
-- `report` 在 `memory` 后端下是同步写入，蓝图中的异步旁路尚未做。
+- `weighted` / `signal` / `ensemble` / `rule_cascade` currently degrade to "pick the first".
+- `RemoteState` does not send gRPC yet (a timeout degrades to an empty view).
+- `[[evolving]]` parses, but is not attached to `Trigger` / `TrainingJob`.
+- `report` writes synchronously on the `memory` backend; the async side path from the blueprint is not built.
 
-## 贡献
+## Contributing
 
-欢迎通过以下方式参与：
+- Open issues and feature requests.
+- Improve docs and examples.
+- Send fixes and tests.
 
-- 提交 Issue 和功能建议；
-- 改进文档和示例；
-- 提交修复和测试。
+Before submitting, run at least `cargo fmt --all -- --check`, `cargo check`, and the tests for the modules you touched.
 
-提交代码前，请至少运行 `cargo fmt --all -- --check`、`cargo check` 和受影响模块的测试。
+## License
 
-## 许可证
+Apache-2.0, matching the workspace `Cargo.toml`.
 
-本项目采用 Apache-2.0 发布（许可证声明与 workspace `Cargo.toml` 一致）。
-
-本项目提供模型路由决策能力，不内置任何具体 AI 模型，也不转发模型请求流量。将路由接入具体业务场景时，使用者应自行承担数据安全、内容安全、许可及适用法律法规要求下的合规责任。
+This project decides which model to call. It does not ship a model and it does not proxy model traffic. When you wire the router into a product, you are responsible for data security, content safety, licensing, and any other compliance duty that applies.

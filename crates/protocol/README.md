@@ -234,3 +234,18 @@ cargo test -p openjiuwen-protocol
 ```bash
 cargo test -p openjiuwen-runtime --test react_agent -- --nocapture
 ```
+
+## 参与贡献
+
+我们欢迎所有形式的贡献，包括但不限于:
+
+- 提交问题和功能建议
+- 改进文档
+- 提交代码
+- 分享使用经验
+
+## 开源许可证
+
+本项目依据Apache-2.0许可证授权。
+
+本产品仅作为流程编排工具，不包含 AI 模型能力；用户在连接 AI 模型用于特定业务场景时，需自行承担欧盟 AI 法案等相关合规义务。
