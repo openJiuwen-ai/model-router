@@ -129,7 +129,7 @@ def _number(value, name, minimum=None, exclusive=False):
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ParamsError("{0} must be a number".format(name))
     number = float(value)
-    if number != number:  # NaN
+    if math.isnan(number):
         raise ParamsError("{0} must be a number".format(name))
     if minimum is not None:
         if exclusive and not number > minimum:
