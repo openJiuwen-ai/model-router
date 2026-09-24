@@ -5,7 +5,7 @@ pub mod routing;
 
 // 兼容旧版公开路径；契约定义仍位于 crate 根模块。
 #[doc(hidden)]
-pub use crate::algorithm_provider as algorithm_provider;
+pub use crate::algorithm_provider;
 #[doc(hidden)]
 pub use crate::algorithm_provider::{AlgorithmProvider, RouteContext};
 #[doc(hidden)]

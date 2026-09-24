@@ -34,7 +34,16 @@ pub trait StateProvider: Send + Sync {
     ///
     /// 检索失败不得阻断请求：返回仅含视图的结果，或返回 `Err` 让 runtime
     /// 回退到 `snapshot`。
-    fn query(&self, key: &RoutingKey, query: &StateQuery) -> Result<StateSnapshot, StateQueryError> {
+    ///
+    /// # Errors
+    ///
+    /// 检索失败时返回 [`StateQueryError`]。runtime 会回退到 [`StateProvider::snapshot`]。
+    /// 默认实现不会失败。
+    fn query(
+        &self,
+        key: &RoutingKey,
+        query: &StateQuery,
+    ) -> Result<StateSnapshot, StateQueryError> {
         let _ = query;
         Ok(StateSnapshot::from_view(self.snapshot(key)))
     }
@@ -43,6 +52,10 @@ pub trait StateProvider: Send + Sync {
     fn report(&self, feedback: Feedback);
 
     /// 带版本原子写回（训练任务 → state）。默认实现为 no-op。
+    ///
+    /// # Errors
+    ///
+    /// 期望版本与当前 active 不一致时返回 [`CasConflict`]。默认实现不会失败。
     fn publish(&self, slot: &str, artifact: &[u8], ver: u64) -> Result<(), CasConflict> {
         let _ = (slot, artifact, ver);
         Ok(())

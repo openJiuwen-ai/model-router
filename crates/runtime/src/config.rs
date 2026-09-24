@@ -18,15 +18,15 @@ pub struct RouterProfile {
 #[derive(Clone, Debug, Deserialize)]
 pub struct StateConfig {
     /// `memory` | `remote`
-    pub backend: String,    // 后端类型
+    pub backend: String, // 后端类型
     #[serde(default)]
-    pub ttl_secs: Option<u64>,    // 缓存超时时间
+    pub ttl_secs: Option<u64>, // 缓存超时时间
     #[serde(default)]
     pub max_entries: Option<usize>, // 缓存最大条目数
     #[serde(default)]
-    pub endpoint: Option<String>,    // 远程端点
+    pub endpoint: Option<String>, // 远程端点
     #[serde(default)]
-    pub timeout_ms: Option<u64>,    // 超时时间
+    pub timeout_ms: Option<u64>, // 超时时间
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -45,7 +45,11 @@ pub struct EvolvingJobConfig {
 }
 
 impl RouterProfile {
-    /// 从文件路径加载配置。返回的是 Result<RouterProfile, RouterError> 类型。
+    /// 从文件路径加载配置。
+    ///
+    /// # Errors
+    ///
+    /// 文件无法读取或 TOML 无法解析时返回 [`RouterError`]。
     pub fn from_path(path: impl AsRef<Path>) -> Result<Self, RouterError> {
         let path = path.as_ref();
         let text = std::fs::read_to_string(path)
@@ -53,7 +57,11 @@ impl RouterProfile {
         Self::from_toml(&text)
     }
 
-    /// 从 TOML 文本加载配置。返回的是 Result<RouterProfile, RouterError> 类型。
+    /// 从 TOML 文本加载配置。
+    ///
+    /// # Errors
+    ///
+    /// TOML 无法解析为 [`RouterProfile`] 时返回 [`RouterError`]。
     pub fn from_toml(text: &str) -> Result<Self, RouterError> {
         toml::from_str(text).map_err(|e| RouterError::Config(format!("parse toml: {e}")))
     }

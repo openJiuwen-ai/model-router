@@ -5,9 +5,7 @@
 
 use std::sync::Arc;
 
-use openjiuwen_protocol::{
-    Feedback, TrainingError, TrainingPrompt, TRAINING_MAX_PROMPTS,
-};
+use openjiuwen_protocol::{Feedback, TrainingError, TrainingPrompt, TRAINING_MAX_PROMPTS};
 
 /// 按 watermark 从 state / 宿主 journal 拉到的增量训练输入，由 DataSelector 组装。
 ///
@@ -36,10 +34,14 @@ impl TrainingBatch {
 
     /// 样本总数（两条通道合计）。
     pub fn len(&self) -> usize {
-        self.feedbacks.len() + self.prompts.len()
+        self.feedbacks.len().saturating_add(self.prompts.len())
     }
 
     /// 严格校验：样本条数上限，逐条校验 prompt 与 feedback。
+    ///
+    /// # Errors
+    ///
+    /// 样本条数超限，或任一 prompt / feedback 校验失败时返回 [`TrainingError`]。
     pub fn validate(&self) -> Result<(), TrainingError> {
         if self.prompts.len() > TRAINING_MAX_PROMPTS {
             return Err(TrainingError::TooManyPrompts);
@@ -73,7 +75,9 @@ pub trait EvolvingProvider: Send + Sync {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use openjiuwen_protocol::{RoutingKey, TrainingError, TRAINING_MAX_PROMPTS, TRAINING_MAX_TEXT_BYTES};
+    use openjiuwen_protocol::{
+        RoutingKey, TrainingError, TRAINING_MAX_PROMPTS, TRAINING_MAX_TEXT_BYTES,
+    };
 
     fn key() -> RoutingKey {
         RoutingKey {
@@ -101,8 +105,7 @@ mod tests {
 
     #[test]
     fn invalid_prompt_fails_batch_validation() {
-        let prompt = TrainingPrompt::new(key())
-            .with_text("x".repeat(TRAINING_MAX_TEXT_BYTES + 1));
+        let prompt = TrainingPrompt::new(key()).with_text("x".repeat(TRAINING_MAX_TEXT_BYTES + 1));
         let batch = TrainingBatch::default().with_prompts(vec![prompt]);
         assert_eq!(batch.validate(), Err(TrainingError::TextTooLarge));
     }

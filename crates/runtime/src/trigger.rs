@@ -9,15 +9,23 @@ use openjiuwen_protocol::FeedbackStats;
 #[derive(Clone, Debug)]
 pub enum TriggerSpec {
     Startup,
-    Delay { seconds: u64 },
-    Interval { seconds: u64 },
-    Cron { expr: String },
+    Delay {
+        seconds: u64,
+    },
+    Interval {
+        seconds: u64,
+    },
+    Cron {
+        expr: String,
+    },
     Threshold {
         metric: String,
         op: Cmp,
         value: f64,
     },
-    Event { kind: String },
+    Event {
+        kind: String,
+    },
     Composite {
         operator: AndOr,
         children: Vec<TriggerSpec>,

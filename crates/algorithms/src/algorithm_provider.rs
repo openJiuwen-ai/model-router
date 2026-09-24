@@ -38,5 +38,9 @@ pub trait AlgorithmProvider: Send + Sync {
     fn name(&self) -> &str;
 
     /// 单步决策。读请求与状态快照，直接返回选中的目标。
+    ///
+    /// # Errors
+    ///
+    /// 没有可选目标或决策无法完成时返回 [`RouterError`]。
     fn decide(&self, request: &RouteRequest, ctx: &RouteContext) -> Result<Decision, RouterError>;
 }

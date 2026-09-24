@@ -34,12 +34,20 @@ impl MockBackend {
 }
 
 enum LlmTurn {
-    Act { thought: String, tool: String, input: String },
-    Finish { thought: String, answer: String },
+    Act {
+        thought: String,
+        tool: String,
+        input: String,
+    },
+    Finish {
+        thought: String,
+        answer: String,
+    },
 }
 
 // 解析模型输出。
-fn parse_turn(text: &str) -> LlmTurn {    // 返回的是 LlmTurn 类型。
+fn parse_turn(text: &str) -> LlmTurn {
+    // 返回的是 LlmTurn 类型。
     // 提取 Thought。
     let thought = line_after(text, "Thought:").unwrap_or_default();
     // 提取 Final Answer。
@@ -47,7 +55,8 @@ fn parse_turn(text: &str) -> LlmTurn {    // 返回的是 LlmTurn 类型。
         return LlmTurn::Finish { thought, answer };
     }
     // 提取 Action。
-    let action: String = line_after(text, "Action:").expect("mock llm must emit Action or Final Answer");
+    let action: String =
+        line_after(text, "Action:").expect("mock llm must emit Action or Final Answer");
     // 分割工具和输入。
     let (tool, input) = split_tool(&action);
     LlmTurn::Act {
@@ -143,12 +152,19 @@ impl ReActAgent {
     }
 
     /// 调模型：失败则 report Unavailable，下一轮 snapshot 会排除该目标。
-    fn call_model(&self, prompt: &str, trace: &mut Vec<String>) -> Result<(Decision, String), RouterError> {
-        for _ in 0..4 {    // 最多4次尝试。
+    fn call_model(
+        &self,
+        prompt: &str,
+        trace: &mut Vec<String>,
+    ) -> Result<(Decision, String), RouterError> {
+        for _ in 0..4 {
+            // 最多4次尝试。
             let decision = self.route(prompt, trace)?;
-            match self.backend.invoke(&decision.selected_model_id, prompt) {    // 调用模型。
-                Ok(text) => {    // 调用成功。
-                    self.report(&decision, Outcome::Ok);    // 上报反馈。
+            match self.backend.invoke(&decision.selected_model_id, prompt) {
+                // 调用模型。
+                Ok(text) => {
+                    // 调用成功。
+                    self.report(&decision, Outcome::Ok); // 上报反馈。
                     return Ok((decision, text));
                 }
                 Err(reason) => {
@@ -156,7 +172,7 @@ impl ReActAgent {
                         "  {} failed ({reason}), report Unavailable",
                         decision.selected_model_id
                     );
-                    self.report(&decision, Outcome::Unavailable);    // 上报反馈。    
+                    self.report(&decision, Outcome::Unavailable); // 上报反馈。
                 }
             }
         }
@@ -169,7 +185,8 @@ impl ReActAgent {
         let mut trace = Vec::new();
         println!("ReAct: {question}");
 
-        for step in 1..=4 {    // 最多4步。
+        for step in 1..=4 {
+            // 最多4步。
             println!("step {step}");
             let (_decision, text) = self.call_model(&prompt, &mut trace)?;
             prompt.push_str(&text);
