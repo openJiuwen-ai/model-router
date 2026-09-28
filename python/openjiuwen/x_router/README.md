@@ -20,10 +20,12 @@ itself.
 ```bash
 python3 -m venv .venv && source .venv/bin/activate   # or: uv venv && source .venv/bin/activate
 pip install maturin
-maturin develop --extras x-router                    # builds the extension, pulls the extra
+maturin develop --extras x-router                    # Transformers classifier
+# Or, on Python 3.10+: maturin develop --extras x-router-vllm
 ```
 
-The extra pulls in torch and transformers. The classifier is not optional:
+The `x-router` extra pulls in torch and transformers; `x-router-vllm` installs
+the tested in-process vLLM version instead. The classifier is not optional:
 assembling a router without one is an error, and the built-in heuristic is a
 fallback for a classifier that fails at request time, or a mode you select
 explicitly with `enabled = false` — never a default.
@@ -153,12 +155,13 @@ raise there rather than turning into a router that quietly stops escalating.
 
 ## Classifier
 
-The classifier runs in your process. There is no server to start and no port to
-open: classification is a function call.
+The classifier runs in your process. Neither backend needs a server or port;
+the default `kind = "local"` uses Transformers.
 
 ```toml
 [x-router.classifier_model]
 enabled = true
+kind = "local"
 model_path = "/path/to/classifier"
 device = "auto"              # "cpu", "cuda", "cuda:1", …
 dtype = "auto"               # "bfloat16", "float16", "float32"
@@ -174,9 +177,35 @@ bfloat16 on CUDA and float32 on CPU.
 with CUDA support; mismatched, the model fails to load and `build_router`
 raises. Decoding is greedy: the same request yields the same tier.
 
-Single device only. There is no sharding, no memory-fraction setting and no
-quantisation; a small classifier fits on one card, and anything that does not
-would need all three.
+The Transformers backend uses a single device; it does not configure sharding,
+memory-fraction limits, or quantisation.
+
+To use vLLM instead, install the `x-router-vllm` extra and change the classifier
+table to:
+
+```toml
+[x-router.classifier_model]
+kind = "vllm"
+model_path = "/path/to/Qwen3-0.6B"
+dtype = "bfloat16"
+max_model_len = 4096
+gpu_memory_utilization = 0.2  # example for a shared GPU; default is 0.9
+max_tokens = 16
+```
+
+Select its GPU with `CUDA_VISIBLE_DEVICES=GPU_INDEX` before starting Python.
+The model loads once when `build_router()` runs; classification then calls
+vLLM's offline `LLM.chat()` API. `device` and `max_input_tokens` apply only to
+the Transformers backend. The vLLM extra requires Python 3.10 or newer and
+should be installed separately from the Transformers extra because their
+transitive dependency constraints can differ.
+
+To test only the classifier, without building the native router extension:
+
+```bash
+CUDA_VISIBLE_DEVICES=GPU_INDEX python examples/smoke_vllm_classifier.py \
+  /path/to/Qwen3-0.6B "What is 2 + 2?"
+```
 
 ### Bringing your own
 
@@ -399,10 +428,13 @@ on one machine.
 | `tier_models` | — | Tier → model id; a `COMPLEX` entry is required |
 | `classifier_preview_chars` | `6000` | Conversation budget in the classifier prompt |
 | `classifier_model.enabled` | `true` | `false` runs on the heuristic classifier |
+| `classifier_model.kind` | `"local"` | `"local"` (Transformers) or `"vllm"` (in-process) |
 | `classifier_model.model_path` | — | Weights; required unless `enabled = false` |
-| `classifier_model.device` | `"auto"` | `"cpu"`, `"cuda"`, `"cuda:N"` |
+| `classifier_model.device` | `"auto"` | Transformers only: `"cpu"`, `"cuda"`, `"cuda:N"` |
 | `classifier_model.dtype` | `"auto"` | `"bfloat16"`, `"float16"`, `"float32"` |
-| `classifier_model.max_input_tokens` | `4096` | Prompt ceiling at tokenisation |
+| `classifier_model.max_input_tokens` | `4096` | Transformers only: prompt ceiling at tokenisation |
+| `classifier_model.max_model_len` | `4096` | vLLM only: model context length |
+| `classifier_model.gpu_memory_utilization` | `0.9` | vLLM only: fraction of GPU memory reserved |
 | `classifier_model.max_tokens` | `16` | Output budget |
 | `bandit.enabled` | `true` | `false` collects outcomes but never overrides |
 | `bandit.min_neighbors` | `5` | Neighbours required before the bandit acts |
