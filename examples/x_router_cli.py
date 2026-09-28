@@ -5,12 +5,13 @@
     echo "some long request" | python examples/x_router_cli.py           # from stdin
 
 Environment:
-    XR_CONFIG   profile to load           (default: config/x-router-example.toml)
-    XR_DEVICE   override the classifier   (default: whatever the profile says)
+    XR_CONFIG             profile to load (default: config/x-router-example.toml)
+    XR_DEVICE             override the Transformers classifier device only
+    CUDA_VISIBLE_DEVICES  select the GPU visible to in-process vLLM
 
-The interpreter has to match the configured device: a CUDA device needs a torch
-built with CUDA support. Mismatched, the classifier fails to load and routing
-degrades to the heuristic — which this script reports rather than hiding.
+For either backend, use a Python environment with CUDA-enabled dependencies.
+An unusable classifier fails during router assembly rather than silently
+degrading to the heuristic.
 
     XR_DEVICE=cuda:0 path/to/cuda-python examples/x_router_cli.py "..."
 """
@@ -41,8 +42,13 @@ def main(argv):
     profile = load_profile(
         os.environ.get("XR_CONFIG", str(REPO / "config" / "x-router-example.toml"))
     )
+    settings = profile.get("x-router", {}).get("classifier_model") or {}
+    kind = settings.get("kind", "local")
     device = os.environ.get("XR_DEVICE")
     if device:
+        if kind == "vllm":
+            print("XR_DEVICE is for kind=local; use CUDA_VISIBLE_DEVICES for vLLM", file=sys.stderr)
+            return 2
         profile.setdefault("x-router", {}).setdefault("classifier_model", {})["device"] = device
 
     started = time.time()
@@ -51,12 +57,15 @@ def main(argv):
     except Exception as exc:
         print("could not assemble the router: {0}".format(exc), file=sys.stderr)
         return 1
-    settings = profile.get("x-router", {}).get("classifier_model") or {}
     model = settings.get("model_path", "-")
+    placement = (
+        "visible_gpus={0}".format(os.environ.get("CUDA_VISIBLE_DEVICES", "all"))
+        if kind == "vllm" else "device={0}".format(settings.get("device", "auto"))
+    )
 
     print(
-        "[classifier {0} device={1}  ready in {2:.1f}s]".format(
-            model, settings.get("device", "auto"), time.time() - started
+        "[classifier kind={0} model={1} {2} ready in {3:.1f}s]".format(
+            kind, model, placement, time.time() - started
         ),
         file=sys.stderr,
     )

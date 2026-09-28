@@ -9,7 +9,7 @@ Design and rationale: see README.md in this directory.
 
 from __future__ import annotations
 
-from .classifier import LocalBackend, backend_from_config
+from .classifier import LocalBackend, VllmBackend, backend_from_config
 from .bandit import (
     BANDIT_COLD,
     BANDIT_IGNORE,
@@ -116,6 +116,7 @@ __all__ = [
     "Scorer",
     "XRouterService",
     "LocalBackend",
+    "VllmBackend",
     "ComplexityBackend",
     "ComplexityLevel",
     "ParamsError",

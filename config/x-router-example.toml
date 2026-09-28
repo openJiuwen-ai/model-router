@@ -20,19 +20,22 @@ COMPLEX = "vendor-a/fast"
 RESEARCH = "vendor-b/deep"
 REASONING = "vendor-c/reasoning"
 
-# The classifier runs in this process. Point it at weights; there is no server
-# to start. Omit this table, or set enabled = false, to run heuristic-only.
+# The classifier runs in this process with Transformers (default) or vLLM.
+# Neither option needs a server. Set enabled = false for heuristic-only routing.
 [x-router.classifier_model]
 enabled = true
+kind = "local"               # change to "vllm" for in-process vLLM
 model_path = "/path/to/Qwen/Qwen3-0.6B"
-
-# "auto" picks cuda:0 when CUDA is available, else cpu. Pin an index on a shared
-# box so the classifier does not land on a card that is already busy.
-device = "auto"              # "cpu", "cuda", "cuda:3", …
-# "auto" is bfloat16 on CUDA and float32 on CPU. A 0.6B is ~1.2 GB in bf16.
 dtype = "auto"               # "bfloat16", "float16", "float32"
-max_input_tokens = 4096      # Prompt budget
 max_tokens = 16              # Output budget
+
+# Transformers-only: "auto" picks cuda:0 when CUDA is available.
+# device = "auto"            # "cpu", "cuda", "cuda:3", …
+# max_input_tokens = 4096
+
+# vLLM-only: select a GPU with CUDA_VISIBLE_DEVICES before starting Python.
+# max_model_len = 4096
+# gpu_memory_utilization = 0.2  # example for a shared GPU; default is 0.9
 
 # ---------------------------------------------------------------------------
 # Bandit (optional, off by default). Lets the outcomes of similar past

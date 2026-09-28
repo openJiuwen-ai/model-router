@@ -1,19 +1,14 @@
-"""Adapts the engine to the algorithm's ``ComplexityBackend`` protocol.
-
-The classifier runs in the router's own process. There is no server and no
-transport: classification is a function call. A host that needs something else —
-a remote classifier, a different model stack — injects its own backend instead,
-which is what the protocol is for.
-"""
+"""In-process classifier backends for the ``ComplexityBackend`` protocol."""
 
 from __future__ import annotations
 
-from typing import Any, Optional
+import threading
+from typing import Any
 
-from ..types import ParamsError
-from .engine import ClassifierEngine
+from ..types import ComplexityLevel, ParamsError
+from .engine import ClassifierEngine, EngineError
 
-__all__ = ["LocalBackend", "backend_from_config"]
+__all__ = ["LocalBackend", "VllmBackend", "backend_from_config"]
 
 
 class LocalBackend(object):
@@ -38,8 +33,76 @@ class LocalBackend(object):
         self.engine.load()
 
 
+class VllmBackend(object):
+    """Run the classifier with vLLM's offline API, without an HTTP server."""
+
+    def __init__(
+        self,
+        model_path,
+        max_tokens=16,
+        dtype="auto",
+        max_model_len=4096,
+        gpu_memory_utilization=0.9,
+    ):
+        # type: (str, int, str, int, float) -> None
+        if not model_path or not str(model_path).strip():
+            raise ParamsError("classifier_model.model_path is required")
+        self.model_path = str(model_path)
+        self.max_tokens = int(max_tokens)
+        self.dtype = dtype
+        self.max_model_len = int(max_model_len)
+        self.gpu_memory_utilization = float(gpu_memory_utilization)
+        self._load_lock = threading.Lock()
+        self._llm = None
+        self._sampling_params = None
+
+    def warmup(self):
+        # type: () -> None
+        """Load weights once, before the first routed request."""
+        if self._llm is not None:
+            return
+        with self._load_lock:
+            if self._llm is not None:
+                return
+            try:
+                from vllm import LLM, SamplingParams
+                from vllm.sampling_params import StructuredOutputsParams
+            except ImportError as exc:
+                raise EngineError(
+                    "the vLLM classifier needs the vllm package; "
+                    "install with the x-router-vllm extra"
+                ) from exc
+
+            sampling_params = SamplingParams(
+                temperature=0,
+                max_tokens=self.max_tokens,
+                structured_outputs=StructuredOutputsParams(
+                    choice=[level.name for level in ComplexityLevel]
+                ),
+            )
+            llm = LLM(
+                model=self.model_path,
+                dtype=self.dtype,
+                max_model_len=self.max_model_len,
+                gpu_memory_utilization=self.gpu_memory_utilization,
+            )
+            self._sampling_params = sampling_params
+            self._llm = llm
+
+    def classify(self, request):
+        # type: (Any) -> str
+        self.warmup()
+        outputs = self._llm.chat(
+            [{"role": "user", "content": request.prompt}],
+            sampling_params=self._sampling_params,
+            chat_template_kwargs={"enable_thinking": False},
+            use_tqdm=False,
+        )
+        return outputs[0].outputs[0].text.strip()
+
+
 def backend_from_config(config):
-    # type: (Any) -> Optional[LocalBackend]
+    # type: (Any) -> Any
     """Build the classifier from a ``[x_router.classifier_model]`` section.
 
     The classifier is required by default. An absent section, or one with no
@@ -58,11 +121,22 @@ def backend_from_config(config):
         )
     if not section.get("enabled", True):
         return None
+    kind = section.get("kind", "local")
+    if kind not in ("local", "vllm"):
+        raise ParamsError("classifier_model.kind must be 'local' or 'vllm', got {0!r}".format(kind))
     model_path = section.get("model_path")
     if not model_path:
         raise ParamsError(
             "[classifier_model] has no model_path; set one, or set "
             "enabled = false to run on the heuristic classifier instead"
+        )
+    if kind == "vllm":
+        return VllmBackend(
+            model_path=model_path,
+            max_tokens=section.get("max_tokens", 16),
+            dtype=section.get("dtype", "auto"),
+            max_model_len=section.get("max_model_len", 4096),
+            gpu_memory_utilization=section.get("gpu_memory_utilization", 0.9),
         )
     return LocalBackend(
         model_path=model_path,

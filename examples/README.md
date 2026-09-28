@@ -9,6 +9,8 @@
 | [`python_integration.py`](python_integration.py) | Python 宿主：dict 配置装配、`route_sync` / `report_sync`、失败重试与排除 | 先 `maturin develop`，再 `python examples/python_integration.py` |
 | [`rust_integration/`](rust_integration/) | Rust 宿主：独立 mini crate，path 依赖 `openjiuwen-runtime`，内联 TOML 装配 | `cd examples/rust_integration && cargo run` |
 | [`x_router_cli.py`](x_router_cli.py) | x-router：从命令行路由请求，看 profile 下每条请求落到哪一档 | `python examples/x_router_cli.py "..."`（需要分类器权重，见 `config/x-router-example.toml`） |
+| [`smoke_vllm_classifier.py`](smoke_vllm_classifier.py) | 直接测试进程内 vLLM 复杂度分类器，无需启动服务或构建路由器扩展 | `CUDA_VISIBLE_DEVICES=GPU_INDEX python examples/smoke_vllm_classifier.py /path/to/model "What is 2 + 2?"` |
+| [`benchmark_classifier.py`](benchmark_classifier.py) | 用相同的 50 个问题比较进程内 Transformers 和 vLLM 分类耗时，不调用目标模型 | `CUDA_VISIBLE_DEVICES=GPU_INDEX python examples/benchmark_classifier.py vllm /path/to/classifier`（再以 `transformers` 运行） |
 | [`x_router_bandit.py`](x_router_bandit.py) | x-router bandit：同一类请求连跑十几轮，看 store 变热后 `bandit=override` 出现；分类器、模型、judge 全部 mock，秒级跑完 | `pip install numpy && python examples/x_router_bandit.py [turns]` |
 
 预期输出（两个示例一致）：第一次 `route` 选中 `fast-local`，mock 故障后回报

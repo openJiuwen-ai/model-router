@@ -13,6 +13,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from types import ModuleType, SimpleNamespace
 
 import pytest  # type: ignore[import-not-found]
 
@@ -29,6 +30,7 @@ from openjiuwen.x_router import (
     ClassifierRequest,
     ComplexityLevel,
     LocalBackend,
+    VllmBackend,
     ParamsError,
     XRouterParams,
     backend_from_config,
@@ -40,7 +42,7 @@ from openjiuwen.x_router import (
     parse_complexity,
     specialize,
 )
-from openjiuwen.x_router.classifier import ClassifierEngine
+from openjiuwen.x_router.classifier import ClassifierEngine, EngineError
 
 TIER_MODELS = {"COMPLEX": "cloud-a", "RESEARCH": "cloud-b", "REASONING": "cloud-c"}
 CATALOG = ["local", "cloud-a", "cloud-b", "cloud-c"]
@@ -345,6 +347,70 @@ def test_local_backend_runs_the_engine_in_process():
     engine = FakeEngine()
     assert LocalBackend(engine=engine, max_tokens=8).classify(ClassifierRequest("PROMPT")) == "COMPLEX"
     assert engine.calls == [("classify_text", "PROMPT", 8)]
+
+
+def test_vllm_backend_runs_in_process_and_loads_once(monkeypatch):
+    loads = []
+    calls = []
+
+    class FakeLLM:
+        def __init__(self, **kwargs):
+            loads.append(kwargs)
+
+        def chat(self, messages, **kwargs):
+            calls.append((messages, kwargs))
+            return [SimpleNamespace(outputs=[SimpleNamespace(text="  COMPLEX  ")])]
+
+    class FakeSamplingParams:
+        def __init__(self, **kwargs):
+            self.options = kwargs
+
+    class FakeStructuredOutputsParams:
+        def __init__(self, **kwargs):
+            self.options = kwargs
+
+    fake_vllm = ModuleType("vllm")
+    fake_vllm.LLM = FakeLLM
+    fake_vllm.SamplingParams = FakeSamplingParams
+    fake_sampling = ModuleType("vllm.sampling_params")
+    fake_sampling.StructuredOutputsParams = FakeStructuredOutputsParams
+    monkeypatch.setitem(sys.modules, "vllm", fake_vllm)
+    monkeypatch.setitem(sys.modules, "vllm.sampling_params", fake_sampling)
+
+    backend = backend_from_config({
+        "kind": "vllm",
+        "model_path": "/models/classifier",
+        "max_tokens": 8,
+        "gpu_memory_utilization": 0.2,
+    })
+    assert isinstance(backend, VllmBackend)
+    assert loads == []
+    backend.warmup()
+    assert backend.classify(ClassifierRequest("PROMPT")) == "COMPLEX"
+    assert len(loads) == 1
+    assert loads[0]["model"] == "/models/classifier"
+    assert loads[0]["gpu_memory_utilization"] == 0.2
+    messages, kwargs = calls[0]
+    assert messages == [{"role": "user", "content": "PROMPT"}]
+    assert kwargs["chat_template_kwargs"] == {"enable_thinking": False}
+    assert kwargs["sampling_params"].options["temperature"] == 0
+    assert kwargs["sampling_params"].options["max_tokens"] == 8
+    assert kwargs["sampling_params"].options["structured_outputs"].options["choice"] == [
+        level.name for level in ComplexityLevel
+    ]
+
+
+def test_vllm_backend_explains_manual_install_when_missing(monkeypatch):
+    monkeypatch.setitem(sys.modules, "vllm", None)
+    backend = VllmBackend(model_path="/models/classifier")
+
+    with pytest.raises(EngineError, match="x-router-vllm extra"):
+        backend.warmup()
+
+
+def test_unknown_classifier_backend_is_an_error():
+    with pytest.raises(ParamsError, match="classifier_model.kind"):
+        backend_from_config({"kind": "unknown", "model_path": "/models/classifier"})
 
 
 @pytest.mark.parametrize("section", [{"enabled": False}, {"enabled": False, "model_path": "/m"}])
