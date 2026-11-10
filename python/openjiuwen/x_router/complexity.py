@@ -147,7 +147,7 @@ def _is_scaffolding(message):
     if role == "system":
         return True
     text = content_text(_field(message, "content")).lstrip()
-    return text.startswith("<system-reminder>") and "<prompt-attachment" in text
+    return text.startswith("<system-reminder>")
 
 
 def _tool_call_names(tool_calls):
